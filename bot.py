@@ -48,12 +48,16 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.cartesia.tts import CartesiaTTSService, language_to_cartesia_language
+from pipecat.services.cartesia.stt import CartesiaSTTService, CartesiaLiveOptions
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai.stt import OpenAISTTService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.daily.transport import DailyParams
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
 
+from LANGUAGE_CONSTANTS import LANGUAGES
 logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
@@ -61,12 +65,27 @@ load_dotenv(override=True)
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
+    body = getattr(runner_args, 'body', {})
+    logger.info(f"Body: {body}")
+    language_arg = body.get("language", "en")
+    topic_arg = body.get("topic", "newton's laws of motion and gravity")
+    language = LANGUAGES[language_arg]["pipecat_language"]
+    cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    prompt = f"""
+    You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
+    """
+
+    cartesia_language = language_to_cartesia_language(language)
+    # stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"), live_options=deepgram_live_options)
+    stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"), language=language)
+
+    input_params = CartesiaTTSService.InputParams(language=cartesia_language)
 
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+        voice_id=cartesia_voice_id,
+        params=input_params
     )
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
@@ -74,7 +93,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     messages = [
         {
             "role": "system",
-            "content": "You are a friendly AI assistant. Respond naturally and keep your answers conversational.",
+            "content": prompt,
         },
     ]
 
@@ -103,13 +122,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         observers=[RTVIObserver(rtvi)],
+
     )
+
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
         # Kick off the conversation.
-        messages.append({"role": "system", "content": "Say hello and briefly introduce yourself."})
+        messages.append({"role": "system", "content": "Say hello and very shortly introduce yourself."})
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
@@ -123,24 +144,22 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
 async def bot(runner_args: RunnerArguments):
-    """Main bot entry point for the bot starter."""
+    """Main bot entry point compatible with Pipecat Cloud."""
 
-    transport_params = {
-        "daily": lambda: DailyParams(
+    transport = DailyTransport(
+        runner_args.room_url,
+        runner_args.token,
+        "Pipecat Bot",
+        params=DailyParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
-            turn_analyzer=LocalSmartTurnAnalyzerV3(),
+            video_out_enabled=True,
+            video_out_width=1024,
+            video_out_height=576,
+            vad_analyzer=SileroVADAnalyzer(),
+            transcription_enabled=True,
         ),
-        "webrtc": lambda: TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
-            turn_analyzer=LocalSmartTurnAnalyzerV3(),
-        ),
-    }
-
-    transport = await create_transport(runner_args, transport_params)
+    )
 
     await run_bot(transport, runner_args)
 
