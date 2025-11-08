@@ -68,11 +68,44 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     body = getattr(runner_args, 'body', {})
     logger.info(f"Body: {body}")
     language_arg = body.get("language", "en")
-    topic_arg = body.get("topic", "newton's laws of motion and gravity")
+    
+    # Check if this is an assessment question or a general topic
+    question_prompt = body.get("question_prompt")
+    rubric = body.get("rubric", [])
+    assignment_id = body.get("assignment_id")
+    question_order = body.get("question_order")
+    
     language = LANGUAGES[language_arg]["pipecat_language"]
     cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
 
-    prompt = f"""
+    # Build prompt based on whether it's an assessment or general conversation
+    if question_prompt:
+        # Assessment mode: focused on specific question
+        logger.info(f"Assessment mode - Assignment: {assignment_id}, Question: {question_order}")
+        rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
+        
+        prompt = f"""
+    You are a friendly teacher conducting a voice-based assessment in {language.value}. 
+
+    The student needs to answer this question:
+    {question_prompt}
+
+    Evaluation criteria:
+    {rubric_text}
+
+    Your role:
+    1. Ask the student to answer the question
+    2. Have a natural conversation to understand their thinking
+    3. Ask follow-up questions to gauge depth of understanding
+    4. Be encouraging and supportive
+    5. Help them elaborate if they're stuck, but don't give away the answer
+    
+    The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses concise and conversational.
+    """
+    else:
+        # General conversation mode (legacy)
+        topic_arg = body.get("topic", "newton's laws of motion and gravity")
+        prompt = f"""
     You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
     """
 
