@@ -37,7 +37,7 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 logger.info("✅ Silero VAD model loaded")
 
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame, LLMMessagesUpdateFrame
 
 logger.info("Loading pipeline components...")
 from pipecat.pipeline.pipeline import Pipeline
@@ -63,6 +63,36 @@ logger.info("✅ All components loaded successfully!")
 load_dotenv(override=True)
 
 
+def build_system_prompt(question_prompt: str, rubric: list, language: Language, topic: str = None) -> str:
+    """Build system prompt based on question or topic."""
+    if question_prompt:
+        # Assessment mode: focused on specific question
+        rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
+        
+        return f"""You are a friendly teacher conducting a voice-based assessment in {language.value}. 
+
+The student needs to answer this question:
+{question_prompt}
+
+Evaluation criteria:
+{rubric_text}
+
+Your role:
+1. Ask the student to answer the question
+2. Have a natural conversation to understand their thinking
+3. Ask follow-up questions to gauge depth of understanding
+4. Be encouraging and supportive
+5. Help them elaborate if they're stuck, but don't give away the answer
+
+The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses concise and conversational.
+"""
+    else:
+        # General conversation mode (legacy)
+        topic = topic or "newton's laws of motion and gravity"
+        return f"""You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
+"""
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
     body = getattr(runner_args, 'body', {})
@@ -78,36 +108,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     language = LANGUAGES[language_arg]["pipecat_language"]
     cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
 
-    # Build prompt based on whether it's an assessment or general conversation
+    # Build initial prompt
     if question_prompt:
-        # Assessment mode: focused on specific question
         logger.info(f"Assessment mode - Assignment: {assignment_id}, Question: {question_order}")
-        rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
-        
-        prompt = f"""
-    You are a friendly teacher conducting a voice-based assessment in {language.value}. 
-
-    The student needs to answer this question:
-    {question_prompt}
-
-    Evaluation criteria:
-    {rubric_text}
-
-    Your role:
-    1. Ask the student to answer the question
-    2. Have a natural conversation to understand their thinking
-    3. Ask follow-up questions to gauge depth of understanding
-    4. Be encouraging and supportive
-    5. Help them elaborate if they're stuck, but don't give away the answer
     
-    The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses concise and conversational.
-    """
-    else:
-        # General conversation mode (legacy)
-        topic_arg = body.get("topic", "newton's laws of motion and gravity")
-        prompt = f"""
-    You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
-    """
+    topic_arg = body.get("topic")
+    prompt = build_system_prompt(question_prompt, rubric, language, topic_arg)
 
     cartesia_language = language_to_cartesia_language(language)
     # stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"), live_options=deepgram_live_options)
@@ -161,10 +167,49 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
-        # Kick off the conversation.
+        logger.info(f"Client connected - waiting for client_ready signal")
+
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        logger.info(f"Client ready - starting conversation")
+        await rtvi.set_bot_ready()
+        # Start the conversation
         messages.append({"role": "system", "content": "Say hello and very shortly introduce yourself."})
         await task.queue_frames([LLMRunFrame()])
+
+    @rtvi.event_handler("on_message_received")
+    async def on_message_received(rtvi, message):
+        logger.info(f"Received message from client: {message}")
+        
+        # Handle context update for question changes
+        if message.get("type") == "update_question_context":
+            data = message.get("data", {})
+            new_question_prompt = data.get("question_prompt")
+            new_rubric = data.get("rubric", [])
+            
+            logger.info(f"Updating context for question: {data.get('question_order')}")
+            
+            # Build new system prompt
+            new_prompt = build_system_prompt(new_question_prompt, new_rubric, language)
+            
+            # Update the context with new system prompt and clear conversation history
+            new_messages = [
+                {
+                    "role": "system",
+                    "content": new_prompt,
+                }
+            ]
+            
+            # Update context and trigger new greeting
+            await task.queue_frames([
+                LLMMessagesUpdateFrame(new_messages),
+            ])
+            
+            # Clear old messages and set new ones
+            messages.clear()
+            messages.extend(new_messages)
+            
+            logger.info("Context updated successfully")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
