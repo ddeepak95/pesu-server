@@ -168,12 +168,12 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         
         # Determine greeting based on question order
         if question_order == 0:
-            greeting = "Acknowledge we're starting with the first question, then ask the student to answer it."
+            greeting = f"Speaking in {language.value}, acknowledge we're starting with the first question, then ask the student to answer it."
         else:
             # Convert order to ordinal (1 -> second, 2 -> third, etc.)
             ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
             ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
-            greeting = f"Acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
+            greeting = f"Speaking in {language.value}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
         
         # Start the conversation
         messages.append({"role": "system", "content": greeting})
