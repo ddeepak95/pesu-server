@@ -181,6 +181,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_message_received(rtvi, message):
         logger.info(f"Received message from client: {message}")
         
+        # Handle greeting trigger for new questions
+        if message.get("type") == "trigger_greeting":
+            logger.info("Triggering transition to current question")
+            # For subsequent questions, just transition smoothly
+            messages.append({"role": "system", "content": "Acknowledge that we're moving to the next question and ask the student to answer it."})
+            await task.queue_frames([LLMRunFrame()])
+            return
+        
         # Handle context update for question changes
         if message.get("type") == "update_question_context":
             data = message.get("data", {})
@@ -200,7 +208,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 }
             ]
             
-            # Update context and trigger new greeting
+            # Update context
             await task.queue_frames([
                 LLMMessagesUpdateFrame(new_messages),
             ])
@@ -209,7 +217,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             messages.clear()
             messages.extend(new_messages)
             
-            logger.info("Context updated successfully")
+            logger.info("Context updated successfully (greeting will be triggered when user starts conversation)")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
