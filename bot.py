@@ -37,7 +37,7 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 logger.info("✅ Silero VAD model loaded")
 
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame, LLMMessagesUpdateFrame
+from pipecat.frames.frames import LLMRunFrame
 
 logger.info("Loading pipeline components...")
 from pipecat.pipeline.pipeline import Pipeline
@@ -63,13 +63,28 @@ logger.info("✅ All components loaded successfully!")
 load_dotenv(override=True)
 
 
-def build_system_prompt(question_prompt: str, rubric: list, language: Language, topic: str = None) -> str:
-    """Build system prompt based on question or topic."""
+async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+    logger.info(f"Starting bot")
+    body = getattr(runner_args, 'body', {})
+    logger.info(f"Body: {body}")
+    language_arg = body.get("language", "en")
+    
+    # Check if this is an assessment question or a general topic
+    question_prompt = body.get("question_prompt")
+    rubric = body.get("rubric", [])
+    assignment_id = body.get("assignment_id")
+    question_order = body.get("question_order")
+    
+    language = LANGUAGES[language_arg]["pipecat_language"]
+    cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
+
+    # Build prompt based on whether it's an assessment or general conversation
     if question_prompt:
         # Assessment mode: focused on specific question
+        logger.info(f"Assessment mode - Assignment: {assignment_id}, Question: {question_order}")
         rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
         
-        return f"""You are a friendly teacher conducting a voice-based assessment in {language.value}. 
+        prompt = f"""You are a friendly teacher conducting a voice-based assessment in {language.value}. 
 
 The student needs to answer this question:
 {question_prompt}
@@ -88,32 +103,9 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 """
     else:
         # General conversation mode (legacy)
-        topic = topic or "newton's laws of motion and gravity"
-        return f"""You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
+        topic_arg = body.get("topic", "newton's laws of motion and gravity")
+        prompt = f"""You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
 """
-
-
-async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
-    body = getattr(runner_args, 'body', {})
-    logger.info(f"Body: {body}")
-    language_arg = body.get("language", "en")
-    
-    # Check if this is an assessment question or a general topic
-    question_prompt = body.get("question_prompt")
-    rubric = body.get("rubric", [])
-    assignment_id = body.get("assignment_id")
-    question_order = body.get("question_order")
-    
-    language = LANGUAGES[language_arg]["pipecat_language"]
-    cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
-
-    # Build initial prompt
-    if question_prompt:
-        logger.info(f"Assessment mode - Assignment: {assignment_id}, Question: {question_order}")
-    
-    topic_arg = body.get("topic")
-    prompt = build_system_prompt(question_prompt, rubric, language, topic_arg)
 
     cartesia_language = language_to_cartesia_language(language)
     # stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"), live_options=deepgram_live_options)
@@ -173,51 +165,19 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_ready(rtvi):
         logger.info(f"Client ready - starting conversation")
         await rtvi.set_bot_ready()
+        
+        # Determine greeting based on question order
+        if question_order == 0:
+            greeting = "Acknowledge we're starting with the first question, then ask the student to answer it."
+        else:
+            # Convert order to ordinal (1 -> second, 2 -> third, etc.)
+            ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
+            ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
+            greeting = f"Acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
+        
         # Start the conversation
-        messages.append({"role": "system", "content": "Say hello and very shortly introduce yourself."})
+        messages.append({"role": "system", "content": greeting})
         await task.queue_frames([LLMRunFrame()])
-
-    @rtvi.event_handler("on_message_received")
-    async def on_message_received(rtvi, message):
-        logger.info(f"Received message from client: {message}")
-        
-        # Handle greeting trigger for new questions
-        if message.get("type") == "trigger_greeting":
-            logger.info("Triggering transition to current question")
-            # For subsequent questions, just transition smoothly
-            messages.append({"role": "system", "content": "Acknowledge that we're moving to the next question and ask the student to answer it."})
-            await task.queue_frames([LLMRunFrame()])
-            return
-        
-        # Handle context update for question changes
-        if message.get("type") == "update_question_context":
-            data = message.get("data", {})
-            new_question_prompt = data.get("question_prompt")
-            new_rubric = data.get("rubric", [])
-            
-            logger.info(f"Updating context for question: {data.get('question_order')}")
-            
-            # Build new system prompt
-            new_prompt = build_system_prompt(new_question_prompt, new_rubric, language)
-            
-            # Update the context with new system prompt and clear conversation history
-            new_messages = [
-                {
-                    "role": "system",
-                    "content": new_prompt,
-                }
-            ]
-            
-            # Update context
-            await task.queue_frames([
-                LLMMessagesUpdateFrame(new_messages),
-            ])
-            
-            # Clear old messages and set new ones
-            messages.clear()
-            messages.extend(new_messages)
-            
-            logger.info("Context updated successfully (greeting will be triggered when user starts conversation)")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
