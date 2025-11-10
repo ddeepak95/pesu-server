@@ -84,7 +84,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info(f"Assessment mode - Assignment: {assignment_id}, Question: {question_order}")
         rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
         
-        prompt = f"""You are a friendly teacher conducting a voice-based assessment in {language.value}. 
+        prompt = f"""You are a teacher conducting a voice-based formative assessment in {language.value}. 
 
 The student needs to answer this question:
 {question_prompt}
@@ -98,6 +98,8 @@ Your role:
 3. Ask follow-up questions to gauge depth of understanding
 4. Be encouraging and supportive
 5. Help them elaborate if they're stuck, but don't give away the answer
+6. Keep the questions short and concise.
+7. Use English for concept-specific words while keeping the conversation in {language.value}.
 
 The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses concise and conversational.
 """
