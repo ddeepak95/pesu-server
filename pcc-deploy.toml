@@ -1,5 +1,5 @@
 agent_name = "pesu-pipecat"
-image = "ddeepak95/pesu-pipecat:0.1"
+image = "ddeepak95/pesu-pipecat:0.2"
 secret_set = "pesu-pipecat-secrets"
 agent_profile = "agent-1x"
 
