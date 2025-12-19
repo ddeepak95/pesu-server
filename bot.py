@@ -4,14 +4,18 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Pipecat Quickstart Example.
+"""Pipecat Voice Assessment Bot.
 
 The example runs a simple voice AI bot that you can connect to using your
 browser and speak with it. You can also deploy this bot to Pipecat Cloud.
 
+Features:
+- Voice-based formative assessment
+- Per-utterance audio recording to Firebase Storage
+- Voice message logging to Supabase
+
 Required AI services:
-- Deepgram (Speech-to-Text)
-- OpenAI (LLM)
+- OpenAI (STT + LLM)
 - Cartesia (Text-to-Speech)
 
 Run the bot using::
@@ -19,7 +23,10 @@ Run the bot using::
     uv run bot.py
 """
 
+import asyncio
+import io
 import os
+import wave
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -46,6 +53,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
+from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService, language_to_cartesia_language
@@ -58,7 +66,30 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 
 from LANGUAGE_CONSTANTS import LANGUAGES
+from firebase_storage import upload_audio, generate_audio_path
+from supabase_client import log_voice_message
+
 logger.info("✅ All components loaded successfully!")
+
+
+def audio_to_wav(audio_bytes: bytes, sample_rate: int, num_channels: int) -> bytes:
+    """Convert raw audio bytes to WAV format.
+    
+    Args:
+        audio_bytes: Raw PCM audio data
+        sample_rate: Sample rate in Hz
+        num_channels: Number of audio channels
+    
+    Returns:
+        WAV-formatted audio bytes
+    """
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(num_channels)
+        wf.setsampwidth(2)  # 16-bit audio
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_bytes)
+    return wav_buffer.getvalue()
 
 load_dotenv(override=True)
 
@@ -74,6 +105,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     rubric = body.get("rubric", [])
     assignment_id = body.get("assignment_id")
     question_order = body.get("question_order")
+    
+    # Session metadata for audio recording
+    submission_id = body.get("submission_id")
+    attempt_number = body.get("attempt_number", 1)
+    
+    # Track utterance counts for unique filenames
+    utterance_counter = {"user": 0, "bot": 0}
+    
+    # Track latest transcripts for pairing with audio
+    latest_transcripts = {"user": "", "bot": ""}
     
     language = LANGUAGES[language_arg]["pipecat_language"]
     cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
@@ -134,6 +175,13 @@ The text you generate will be used by TTS to speak to the student, so don't incl
     context_aggregator = LLMContextAggregatorPair(context)
 
     rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+    
+    # Audio buffer for per-utterance recording
+    audiobuffer = AudioBufferProcessor(
+        num_channels=1,
+        enable_turn_audio=True,  # Enable per-turn audio events
+        user_continuous_stream=True,
+    )
 
     pipeline = Pipeline(
         [
@@ -144,6 +192,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             llm,  # LLM
             tts,  # TTS
             transport.output(),  # Transport bot output
+            audiobuffer,  # Audio recording (after output for both user and bot audio)
             context_aggregator.assistant(),  # Assistant spoken responses
         ]
     )
@@ -168,6 +217,13 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         logger.info(f"Client ready - starting conversation")
         await rtvi.set_bot_ready()
         
+        # Start audio recording
+        if submission_id:
+            await audiobuffer.start_recording()
+            utterance_counter["user"] = 0
+            utterance_counter["bot"] = 0
+            logger.info(f"Audio recording started for submission {submission_id}")
+        
         # Determine greeting based on question order
         if question_order == 0:
             greeting = f"Speaking in {language.value}, acknowledge we're starting with the first question, then ask the student to answer it."
@@ -183,8 +239,105 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
+        logger.info(f"Client disconnected - logged {utterance_counter['user']} user and {utterance_counter['bot']} bot utterances")
         await task.cancel()
+    
+    # Per-utterance audio recording handlers
+    @audiobuffer.event_handler("on_user_turn_audio_data")
+    async def on_user_turn_audio_data(buffer, audio, sample_rate, num_channels):
+        """Handle each user (student) utterance - fires when student stops speaking."""
+        if not submission_id or not assignment_id:
+            logger.warning("Missing submission_id or assignment_id, skipping audio logging")
+            return
+        
+        utterance_counter["user"] += 1
+        utterance_num = utterance_counter["user"]
+        
+        try:
+            # Convert to WAV bytes
+            wav_bytes = audio_to_wav(audio, sample_rate, num_channels)
+            
+            # Generate storage path
+            path = generate_audio_path(
+                submission_id, question_order, attempt_number, "user", utterance_num
+            )
+            
+            # Upload to Firebase (run in thread to avoid blocking)
+            audio_url = await asyncio.to_thread(upload_audio, wav_bytes, path)
+            
+            # Get transcript from context (latest user message)
+            user_transcript = latest_transcripts.get("user", "")
+            if not user_transcript and len(messages) >= 2:
+                # Try to get from messages context
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        user_transcript = msg.get("content", "")
+                        break
+            
+            # Log to Supabase
+            await asyncio.to_thread(
+                log_voice_message,
+                submission_id,
+                assignment_id,
+                question_order,
+                "student",
+                user_transcript,
+                audio_url,
+                attempt_number
+            )
+            
+            logger.info(f"Logged user utterance #{utterance_num}: {len(wav_bytes)} bytes, transcript: {user_transcript[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"Error logging user utterance #{utterance_num}: {e}")
+    
+    @audiobuffer.event_handler("on_bot_turn_audio_data")
+    async def on_bot_turn_audio_data(buffer, audio, sample_rate, num_channels):
+        """Handle each bot (teacher) utterance - fires when bot stops speaking."""
+        if not submission_id or not assignment_id:
+            logger.warning("Missing submission_id or assignment_id, skipping audio logging")
+            return
+        
+        utterance_counter["bot"] += 1
+        utterance_num = utterance_counter["bot"]
+        
+        try:
+            # Convert to WAV bytes
+            wav_bytes = audio_to_wav(audio, sample_rate, num_channels)
+            
+            # Generate storage path
+            path = generate_audio_path(
+                submission_id, question_order, attempt_number, "bot", utterance_num
+            )
+            
+            # Upload to Firebase
+            audio_url = await asyncio.to_thread(upload_audio, wav_bytes, path)
+            
+            # Get transcript from context (latest assistant message)
+            bot_transcript = latest_transcripts.get("bot", "")
+            if not bot_transcript and len(messages) >= 1:
+                # Try to get from messages context
+                for msg in reversed(messages):
+                    if msg.get("role") == "assistant":
+                        bot_transcript = msg.get("content", "")
+                        break
+            
+            # Log to Supabase
+            await asyncio.to_thread(
+                log_voice_message,
+                submission_id,
+                assignment_id,
+                question_order,
+                "assistant",
+                bot_transcript,
+                audio_url,
+                attempt_number
+            )
+            
+            logger.info(f"Logged bot utterance #{utterance_num}: {len(wav_bytes)} bytes, transcript: {bot_transcript[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"Error logging bot utterance #{utterance_num}: {e}")
 
 
 
