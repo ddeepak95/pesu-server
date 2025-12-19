@@ -167,3 +167,34 @@ def update_voice_message_audio(
     logger.info(f"Updated voice message {message_id} with audio URL")
     
     return result.data[0] if result.data else {}
+
+
+def update_voice_message_interrupted(message_id: str, interrupted: bool) -> dict:
+    """Update only the interrupted flag for a voice message."""
+    supabase = get_supabase()
+    result = (
+        supabase.table("voice_messages")
+        .update({"interrupted": interrupted})
+        .eq("id", message_id)
+        .execute()
+    )
+    logger.info(f"Updated voice message {message_id} interrupted={interrupted}")
+    return result.data[0] if result.data else {}
+
+
+def update_voice_message_content(
+    message_id: str,
+    content: str,
+    spoken_at: Optional[str] = None,
+    generated_content: Optional[str] = None,
+) -> dict:
+    """Update content (and optionally spoken_at / generated_content) for a voice message."""
+    supabase = get_supabase()
+    data: dict = {"content": content}
+    if spoken_at is not None:
+        data["spoken_at"] = spoken_at
+    if generated_content is not None:
+        data["generated_content"] = generated_content
+    result = supabase.table("voice_messages").update(data).eq("id", message_id).execute()
+    logger.info(f"Updated voice message {message_id} content (len={len(content)})")
+    return result.data[0] if result.data else {}
