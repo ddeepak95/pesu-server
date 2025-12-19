@@ -6,7 +6,7 @@ and retrieve their public URLs.
 
 import json
 import os
-
+import base64
 import firebase_admin
 from firebase_admin import credentials, storage
 from loguru import logger
@@ -22,17 +22,18 @@ def init_firebase():
         return  # Already initialized
     
     # cred_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_KEY")
-    cred_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+    # cred_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+    base64_cred = os.getenv("FIREBASE_SERVICE_ACCOUNT_BASE64")
     bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
     
     if not bucket_name:
         raise ValueError("FIREBASE_STORAGE_BUCKET environment variable is not set")
     
-    if cred_path:
-        # Service account key provided as JSON string
+    if base64_cred:
+        sa_dict = json.loads(base64.b64decode(base64_cred).decode('utf-8'))
         try:
-            cred = credentials.Certificate(cred_path)
-            logger.info(f"Firebase Admin initialized with credentials from {cred_path}")
+            cred = credentials.Certificate(sa_dict)
+            logger.info(f"Firebase Admin initialized with credentials from base64")
         except Exception as e:
             raise ValueError(f"Failed to initialize Firebase Admin: {e}")
     
