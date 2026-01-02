@@ -54,6 +54,8 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     LLMFullResponseStartFrame,
     LLMFullResponseEndFrame,
+    EndTaskFrame,
+    TTSSpeakFrame,
 )
 
 logger.info("Loading pipeline components...")
@@ -73,6 +75,9 @@ from pipecat.services.cartesia.stt import CartesiaSTTService, CartesiaLiveOption
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.openai.stt import OpenAISTTService
+from pipecat.services.llm_service import FunctionCallParams
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
@@ -205,6 +210,59 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
+    # Define end_conversation function schema
+    # The description guides when the LLM should call this function
+    end_conversation_function = FunctionSchema(
+        name="end_conversation",
+        description="End the conversation gracefully. Call this when: (1) the student explicitly refuses to answer (e.g., says 'I refuse', 'I don't want to', 'I can't answer'), or (2) the student has thoroughly answered the question and you're satisfied with their response. Always provide a polite ending message thanking the student.",
+        properties={
+            "reason": {
+                "type": "string",
+                "enum": ["refusal", "thorough"],
+                "description": "Use 'refusal' if the student explicitly refuses to answer. Use 'thorough' if the student has thoroughly answered the question.",
+            },
+            "message": {
+                "type": "string",
+                "description": "A polite ending message in the conversation language thanking the student and indicating the conversation is ending.",
+            },
+        },
+        required=["reason", "message"],
+    )
+
+    # Create tools schema with end_conversation function
+    tools = ToolsSchema(standard_tools=[end_conversation_function])
+
+    # Function handler for end_conversation
+    async def handle_end_conversation(params: FunctionCallParams):
+        """Handle end_conversation function call to gracefully terminate the conversation."""
+        reason = params.arguments.get("reason", "")
+        message = params.arguments.get("message", "")
+        
+        # Generate default message if not provided (fallback - LLM should provide message per prompt)
+        if not message:
+            if reason == "refusal":
+                message = "I understand. Thank you for your time. The conversation is ending."
+            elif reason == "thorough":
+                message = "Thank you for your thorough response. The conversation is now ending."
+            else:
+                message = "Thank you. The conversation is now ending."
+            logger.warning(f"No ending message provided by LLM, using default English message for reason: {reason}")
+        
+        logger.info(f"Ending conversation with reason: {reason}, message: {message[:50]}...")
+        
+        # Push ending message through TTS
+        await params.llm.push_frame(TTSSpeakFrame(message))
+        
+        # Wait a brief moment to ensure the TTS frame is processed and added to conversation context
+        # This ensures the ending message appears in the frontend transcript
+        await asyncio.sleep(0.5)
+        
+        # Push EndTaskFrame upstream to gracefully end the conversation
+        await params.llm.push_frame(EndTaskFrame(), FrameDirection.UPSTREAM)
+    
+    # Register the function handler
+    llm.register_function("end_conversation", handle_end_conversation)
+
     messages = [
         {
             "role": "system",
@@ -212,7 +270,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         },
     ]
 
-    context = LLMContext(messages)
+    context = LLMContext(messages, tools=tools)
     context_aggregator = LLMContextAggregatorPair(context)
 
     rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
