@@ -8,4 +8,6 @@ LANGUAGES = {
     "kn": {"pipecat_language": Language.KN, "name": "Kannada", "cartesia_voice_id": "6baae46d-1226-45b5-a976-c7f9b797aae2"},
     "ml": {"pipecat_language": Language.ML, "name": "Malayalam", "cartesia_voice_id": "374b80da-e622-4dfc-90f6-1eeb13d331c9"},
     "es": {"pipecat_language": Language.ES, "name": "Spanish", "cartesia_voice_id": "15d0c2e2-8d29-44c3-be23-d585d5f154a1"},
+    "fr": {"pipecat_language": Language.FR, "name": "French", "cartesia_voice_id": "ab636c8b-9960-4fb3-bb0c-b7b655fb9745"},
+    "zh": {"pipecat_language": Language.ZH, "name": "Chinese", "cartesia_voice_id": "c59c247b-6aa9-4ab6-91f9-9eabea7dc69e"},
 }
