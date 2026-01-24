@@ -17,6 +17,9 @@ _supabase_client: Optional[Client] = None
 def get_supabase() -> Client:
     """Get or create a Supabase client (singleton pattern).
     
+    Selects the appropriate Supabase instance (development or production)
+    based on the SUPABASE_ENV environment variable. Defaults to 'development'.
+    
     Returns:
         Supabase client instance
     
@@ -28,16 +31,28 @@ def get_supabase() -> Client:
     if _supabase_client is not None:
         return _supabase_client
     
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    # Get environment (defaults to 'development')
+    env = os.getenv("SUPABASE_ENV", "development")
     
-    if not supabase_url:
-        raise ValueError("SUPABASE_URL environment variable is not set")
-    if not supabase_key:
-        raise ValueError("SUPABASE_ANON_KEY environment variable is not set")
+    # Select credentials based on environment
+    if env == "production":
+        supabase_url = os.getenv("SUPABASE_PROD_URL")
+        supabase_key = os.getenv("SUPABASE_PROD_ANON_KEY")
+        if not supabase_url:
+            raise ValueError("SUPABASE_PROD_URL environment variable is not set")
+        if not supabase_key:
+            raise ValueError("SUPABASE_PROD_ANON_KEY environment variable is not set")
+    else:
+        # Default to development
+        supabase_url = os.getenv("SUPABASE_DEV_URL")
+        supabase_key = os.getenv("SUPABASE_DEV_ANON_KEY")
+        if not supabase_url:
+            raise ValueError("SUPABASE_DEV_URL environment variable is not set")
+        if not supabase_key:
+            raise ValueError("SUPABASE_DEV_ANON_KEY environment variable is not set")
     
     _supabase_client = create_client(supabase_url, supabase_key)
-    logger.info("Supabase client initialized")
+    logger.info(f"Supabase client initialized for environment: {env}")
     
     return _supabase_client
 
