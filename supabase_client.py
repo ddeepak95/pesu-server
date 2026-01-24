@@ -12,13 +12,35 @@ from supabase import create_client, Client
 
 
 _supabase_client: Optional[Client] = None
+_current_env: Optional[str] = None  # Track which env the client is configured for
+_current_env_override: Optional[str] = None  # Per-request environment override
+
+
+def set_supabase_env(env: str) -> None:
+    """Set the Supabase environment override for this request.
+    
+    This allows the frontend to specify which Supabase instance to use,
+    enabling local frontend instances to log to dev Supabase even when
+    the bot runs on Pipecat Cloud (which may default to production).
+    
+    Args:
+        env: The environment to use ('development' or 'production')
+    """
+    global _current_env_override
+    _current_env_override = env
+    logger.info(f"Supabase environment override set to: {env}")
 
 
 def get_supabase() -> Client:
-    """Get or create a Supabase client (singleton pattern).
+    """Get or create a Supabase client.
     
-    Selects the appropriate Supabase instance (development or production)
-    based on the SUPABASE_ENV environment variable. Defaults to 'development'.
+    Selects the appropriate Supabase instance based on:
+    1. Environment override (set via set_supabase_env) - takes precedence
+    2. SUPABASE_ENV environment variable
+    3. Defaults to 'development'
+    
+    If the environment changes (e.g., override is set), the client is
+    recreated to use the correct credentials.
     
     Returns:
         Supabase client instance
@@ -26,13 +48,18 @@ def get_supabase() -> Client:
     Raises:
         ValueError: If required environment variables are not set
     """
-    global _supabase_client
+    global _supabase_client, _current_env
     
-    if _supabase_client is not None:
+    # Determine effective environment (override takes precedence)
+    env = _current_env_override or os.getenv("SUPABASE_ENV", "development")
+    
+    # Return existing client if environment hasn't changed
+    if _supabase_client is not None and _current_env == env:
         return _supabase_client
     
-    # Get environment (defaults to 'development')
-    env = os.getenv("SUPABASE_ENV", "development")
+    # Log if we're switching environments
+    if _current_env is not None and _current_env != env:
+        logger.info(f"Switching Supabase environment from {_current_env} to {env}")
     
     # Select credentials based on environment
     if env == "production":
@@ -52,6 +79,7 @@ def get_supabase() -> Client:
             raise ValueError("SUPABASE_DEV_ANON_KEY environment variable is not set")
     
     _supabase_client = create_client(supabase_url, supabase_key)
+    _current_env = env
     logger.info(f"Supabase client initialized for environment: {env}")
     
     return _supabase_client

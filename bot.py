@@ -120,6 +120,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
     body = getattr(runner_args, 'body', {})
     logger.info(f"Body: {body}")
+    
+    # Apply Supabase environment override from frontend (for correct dev/prod targeting)
+    supabase_env = body.get("supabase_env")
+    if supabase_env:
+        from supabase_client import set_supabase_env
+        set_supabase_env(supabase_env)
+        logger.info(f"Supabase environment override applied: {supabase_env}")
+    
     language_arg = body.get("language", "en")
     
     # Check if this is an assessment question or a general topic
