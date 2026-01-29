@@ -136,6 +136,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     assignment_id = body.get("assignment_id")
     question_order = body.get("question_order")
     
+    # New: Custom prompts from frontend (already interpolated)
+    # If provided, these take precedence over the hardcoded prompts
+    custom_system_prompt = body.get("system_prompt")
+    custom_greeting = body.get("greeting")
+    
     # Session metadata for audio recording
     submission_id = body.get("submission_id")
     attempt_number = body.get("attempt_number", 1)
@@ -174,9 +179,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
 
     # Build prompt based on whether it's an assessment or general conversation
-    if question_prompt:
-        # Assessment mode: focused on specific question
-        logger.info(f"Assessment mode - Assignment: {assignment_id}, Question: {question_order}")
+    # TTS instruction to append for voice mode
+    TTS_INSTRUCTION = "\n\nThe text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly."
+    
+    if custom_system_prompt:
+        # New path: Use frontend-provided prompt (already interpolated)
+        logger.info(f"Using custom system prompt from frontend - Assignment: {assignment_id}, Question: {question_order}")
+        prompt = custom_system_prompt + TTS_INSTRUCTION
+    elif question_prompt:
+        # Assessment mode: focused on specific question (backward compatibility)
+        logger.info(f"Assessment mode (legacy) - Assignment: {assignment_id}, Question: {question_order}")
         rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
         
         # Build prompt with two-phase instructions for first question
@@ -595,9 +607,15 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             logger.info(f"Audio recording started for submission {submission_id}")
         
         # Determine greeting based on question order
-        if question_order == 0:
+        if custom_greeting:
+            # New path: Use frontend-provided greeting (already interpolated)
+            logger.info(f"Using custom greeting from frontend")
+            greeting = custom_greeting
+        elif question_order == 0:
+            # Legacy path: First question greeting
             greeting = f"Speaking in {language.value}, start by introducing yourself as Konvo and tell that you are their teacher's assistant. Say that we are going to do an activity today. Explain that the student will take part by responding to your questions and they can also ask for doubts if any. Ask them to be in a quieter place to avoid disturbances and ask if the student is ready to start. Ask them to say 'yes' or 'ready' when they are ready to start. Wait for their acknowledgment before explaining the question."
         else:
+            # Legacy path: Subsequent question greeting
             # Convert order to ordinal (1 -> second, 2 -> third, etc.)
             ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
             ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
