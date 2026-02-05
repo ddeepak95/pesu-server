@@ -81,7 +81,6 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
-
 from LANGUAGE_CONSTANTS import LANGUAGES
 from firebase_storage import upload_audio, generate_audio_path
 from supabase_client import (
@@ -944,6 +943,15 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 async def bot(runner_args: RunnerArguments):
     """Main bot entry point compatible with Pipecat Cloud."""
 
+    body = getattr(runner_args, "body", {})
+    supabase_env = body.get("supabase_env")
+    effective_env = supabase_env or os.getenv("SUPABASE_ENV", "development")
+    use_krisp_filter = effective_env == "production"
+    krisp_filter = None
+    if use_krisp_filter:
+        from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
+        krisp_filter = KrispVivaFilter()
+
     transport = DailyTransport(
         runner_args.room_url,
         runner_args.token,
@@ -956,6 +964,7 @@ async def bot(runner_args: RunnerArguments):
             video_out_height=576,
             vad_analyzer=SileroVADAnalyzer(),
             transcription_enabled=True,
+            audio_in_filter=krisp_filter,
         ),
     )
 
