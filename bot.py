@@ -63,10 +63,13 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    UserTurnStoppedMessage,
+    AssistantTurnStoppedMessage,
+)
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
-from pipecat.processors.transcript_processor import TranscriptProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -82,12 +85,13 @@ from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from LANGUAGE_CONSTANTS import LANGUAGES
-from firebase_storage import upload_audio, generate_audio_path
+from firebase_storage import upload_audio, generate_audio_path, generate_session_audio_chunk_path
 from supabase_client import (
     log_voice_message,
     update_voice_message_audio,
     update_voice_message_interrupted,
     update_voice_message_content,
+    append_session_audio_chunk,
 )
 
 logger.info("✅ All components loaded successfully!")
@@ -155,14 +159,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     is_disconnecting = False
     disconnect_bot_row_id: str | None = None
 
-    # Pending audio queues - populated by AudioBufferProcessor, consumed when transcript arrives
-    # Each entry is a dict with: audio_num, wav_bytes
-    pending_user_audio_queue = deque()
-    pending_bot_audio_queue = deque()
-
-    # Pending DB rows (transcript-first). Each entry is a dict: {id}
-    pending_user_rows = deque()
-    pending_bot_rows = deque()
+    # ID-based correlation: maps utterance_id -> row or audio item
+    # utterance_id = f"{submission_id}:{question_order}:{attempt_number}:user|bot:{ordinal}"
+    user_transcripts: dict[str, dict] = {}
+    user_audio: dict[str, dict] = {}
+    bot_transcripts: dict[str, dict] = {}
+    bot_audio: dict[str, dict] = {}
 
     # Prevent concurrent flushes from double-popping
     user_flush_lock = asyncio.Lock()
@@ -326,7 +328,9 @@ The text you generate will be used by TTS to speak to the student, so don't incl
     ]
 
     context = LLMContext(messages, tools=tools)
-    context_aggregator = LLMContextAggregatorPair(context)
+    context_aggregator_pair = LLMContextAggregatorPair(context)
+    user_aggregator = context_aggregator_pair.user()
+    assistant_aggregator = context_aggregator_pair.assistant()
 
     rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
 
@@ -360,31 +364,33 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             # Always forward frame unchanged
             await self.push_frame(frame, direction)
     
-    # Audio buffer for per-utterance recording
+    # Sample rate for buffer_size and WAV conversion (Pipecat/Daily typically 24kHz or 16kHz)
+    SAMPLE_RATE = 24000
+    CHUNK_DURATION_SEC = 60
+    # Audio buffer: per-turn audio + 60-second composite chunks
     audiobuffer = AudioBufferProcessor(
         num_channels=1,
-        enable_turn_audio=True,  # Enable per-turn audio events
+        enable_turn_audio=True,
         user_continuous_stream=True,
+        sample_rate=SAMPLE_RATE,
+        buffer_size=SAMPLE_RATE * 2 * CHUNK_DURATION_SEC,  # 16-bit mono, 60s chunks
     )
-    
-    # TranscriptProcessor to capture transcripts with proper timing
-    transcript_processor = TranscriptProcessor()
+    session_chunk_counter = 0
+
     llm_full_capture = LLMFullResponseCaptureProcessor()
 
     pipeline = Pipeline(
         [
-            transport.input(),  # Transport user input
-            rtvi,  # RTVI processor
+            transport.input(),
+            rtvi,
             stt,
-            transcript_processor.user(),  # Capture user transcripts AFTER STT
-            context_aggregator.user(),  # User responses
-            llm,  # LLM
-            llm_full_capture,  # capture full LLM output for generated_content
-            tts,  # TTS
-            transport.output(),  # Transport bot output
-            transcript_processor.assistant(),  # Capture assistant transcripts AFTER TTS output (what was spoken)
-            audiobuffer,  # Audio recording (after output for both user and bot audio)
-            context_aggregator.assistant(),  # Assistant spoken responses (keeps conversation memory)
+            user_aggregator,
+            llm,
+            llm_full_capture,
+            tts,
+            transport.output(),
+            audiobuffer,
+            assistant_aggregator,
         ]
     )
 
@@ -409,143 +415,111 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         (BotStartedSpeakingFrame, BotStoppedSpeakingFrame, UserStartedSpeakingFrame)
     )
 
-    # TranscriptProcessor event handler - captures transcripts as they flow through pipeline
-    @transcript_processor.event_handler("on_transcript_update")
-    async def on_transcript_update(processor, frame):
-        """Queue transcripts as they arrive from STT/TTS for matching with audio."""
-        nonlocal is_disconnecting, disconnect_bot_row_id
-        async def _attach_user_audio(row: dict, audio_item: dict):
-            path = generate_audio_path(
-                submission_id, question_order, attempt_number, "user", audio_item["audio_num"]
-            )
-            audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
-            await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, None)
-            logger.info(f"Attached user audio #{audio_item['audio_num']} (row={row['id']})")
+    def _track_task(t: asyncio.Task):
+        background_tasks.add(t)
+        t.add_done_callback(lambda _t: background_tasks.discard(_t))
 
-        async def _attach_bot_audio(row: dict, audio_item: dict):
-            path = generate_audio_path(
-                submission_id, question_order, attempt_number, "bot", audio_item["audio_num"]
-            )
-            audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
-            interrupted = audio_item.get("interrupted", False)
-            await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, interrupted)
-            logger.info(
-                f"Attached bot audio #{audio_item['audio_num']} (row={row['id']}), interrupted={interrupted}"
-            )
+    async def _attach_user_audio(row: dict, audio_item: dict):
+        path = generate_audio_path(
+            submission_id, question_order, attempt_number, "user", audio_item["audio_num"]
+        )
+        audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
+        await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, None)
+        logger.info(f"Attached user audio #{audio_item['audio_num']} (row={row['id']})")
 
-        def _track_task(t: asyncio.Task):
-            background_tasks.add(t)
-            t.add_done_callback(lambda _t: background_tasks.discard(_t))
+    async def _attach_bot_audio(row: dict, audio_item: dict):
+        path = generate_audio_path(
+            submission_id, question_order, attempt_number, "bot", audio_item["audio_num"]
+        )
+        audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
+        interrupted = audio_item.get("interrupted", False)
+        await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, interrupted)
+        logger.info(f"Attached bot audio #{audio_item['audio_num']} (row={row['id']}), interrupted={interrupted}")
 
-        async def _flush_user():
-            if not submission_id or not assignment_id:
-                return
-            async with user_flush_lock:
-                while pending_user_audio_queue and pending_user_rows:
-                    audio_item = pending_user_audio_queue.popleft()
-                    row = pending_user_rows.popleft()
-                    _track_task(asyncio.create_task(_attach_user_audio(row, audio_item)))
+    @user_aggregator.event_handler("on_user_turn_stopped")
+    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+        """Create voice_messages row from turn event and attach audio if already available."""
+        if not submission_id or not assignment_id:
+            return
+        transcript_counter["user"] += 1
+        utterance_id = f"{submission_id}:{question_order}:{attempt_number}:user:{transcript_counter['user']}"
+        timestamp = getattr(message, "timestamp", None) or datetime.now(timezone.utc).isoformat()
+        if isinstance(timestamp, str):
+            spoken_at = timestamp
+        else:
+            spoken_at = getattr(timestamp, "isoformat", lambda: datetime.now(timezone.utc).isoformat())()
+        content = (getattr(message, "content", None) or "").strip()
+        logger.debug(f"User turn stopped #{transcript_counter['user']}: {content[:80] if content else '(empty)'}...")
+        record = await asyncio.to_thread(
+            log_voice_message,
+            submission_id,
+            assignment_id,
+            question_order,
+            "student",
+            content,
+            attempt_number,
+            None,
+            None,
+            False,
+            spoken_at,
+            None,
+            utterance_id,
+        )
+        if not record or not record.get("id"):
+            return
+        async with user_flush_lock:
+            user_transcripts[utterance_id] = {"id": record["id"]}
+            audio_item = user_audio.pop(utterance_id, None)
+        if audio_item:
+            _track_task(asyncio.create_task(_attach_user_audio({"id": record["id"]}, audio_item)))
 
-        async def _flush_bot():
-            if not submission_id or not assignment_id:
-                return
-            async with bot_flush_lock:
-                while pending_bot_audio_queue and pending_bot_rows:
-                    audio_item = pending_bot_audio_queue.popleft()
-                    row = pending_bot_rows.popleft()
-                    _track_task(asyncio.create_task(_attach_bot_audio(row, audio_item)))
+    @assistant_aggregator.event_handler("on_assistant_turn_stopped")
+    async def on_assistant_turn_stopped(aggregator, message: AssistantTurnStoppedMessage):
+        """Create voice_messages row from turn event or update disconnect placeholder."""
+        nonlocal disconnect_bot_row_id
+        if not submission_id or not assignment_id:
+            return
+        content = (getattr(message, "content", None) or "").strip()
+        timestamp = getattr(message, "timestamp", None) or datetime.now(timezone.utc).isoformat()
+        spoken_at = timestamp if isinstance(timestamp, str) else getattr(timestamp, "isoformat", lambda: datetime.now(timezone.utc).isoformat())()
+        full_text = (full_assistant_text_queue.popleft() if full_assistant_text_queue else "") or content
 
-        def _as_iso_timestamp(ts) -> str:
-            """TranscriptProcessor timestamps may be datetime, str, or None."""
-            if ts is None:
-                return datetime.now(timezone.utc).isoformat()
-            if isinstance(ts, str):
-                return ts
-            iso = getattr(ts, "isoformat", None)
-            if callable(iso):
-                return iso()
-            return datetime.now(timezone.utc).isoformat()
+        if is_disconnecting and disconnect_bot_row_id:
+            try:
+                await asyncio.to_thread(update_voice_message_content, disconnect_bot_row_id, content, spoken_at, None)
+                await asyncio.to_thread(update_voice_message_interrupted, disconnect_bot_row_id, True)
+                logger.info("Updated disconnect bot row with late assistant transcript")
+            except Exception as e:
+                logger.error(f"Failed updating disconnect bot row with transcript: {e}")
+            finally:
+                disconnect_bot_row_id = None
+            return
 
-        for message in getattr(frame, "messages", []) or []:
-            # Be defensive: message can be an object or a dict-like
-            role = getattr(message, "role", None)
-            content = getattr(message, "content", None)
-            ts = getattr(message, "timestamp", None)
-            if role is None and isinstance(message, dict):
-                role = message.get("role")
-                content = message.get("content")
-                ts = message.get("timestamp")
-
-            timestamp = _as_iso_timestamp(ts)
-            content = content or ""
-
-            if role in ("user", "student"):
-                transcript_counter["user"] += 1
-                logger.debug(
-                    f"User transcript #{transcript_counter['user']}: "
-                    f"{content[:80] if content else '(empty)'}..."
-                )
-                # Always log transcript immediately (prevents missing utterances if audio event never fires)
-                record = await asyncio.to_thread(
-                    log_voice_message,
-                    submission_id,
-                    assignment_id,
-                    question_order,
-                    "student",
-                    content,
-                    attempt_number,
-                    None,
-                    None,
-                    False,
-                    timestamp,
-                    None,
-                )
-                if record and record.get("id"):
-                    pending_user_rows.append({"id": record["id"]})
-                await _flush_user()
-            elif role in ("assistant", "bot"):
-                transcript_counter["bot"] += 1
-                logger.debug(
-                    f"Assistant transcript #{transcript_counter['bot']}: "
-                    f"{content[:80] if content else '(empty)'}..."
-                )
-                full_text = (full_assistant_text_queue.popleft() if full_assistant_text_queue else "") or content
-
-                # If we disconnected while bot was speaking, we may have already created (or selected)
-                # a bot row to represent that in-flight utterance. In that case, UPDATE it instead of INSERTing
-                # a second row (which caused duplicates with interrupted True/False).
-                if is_disconnecting and disconnect_bot_row_id:
-                    try:
-                        await asyncio.to_thread(update_voice_message_content, disconnect_bot_row_id, content, timestamp, None)
-                        await asyncio.to_thread(update_voice_message_interrupted, disconnect_bot_row_id, True)
-                        logger.info("Updated disconnect bot row with late assistant transcript (no duplicate insert)")
-                    except Exception as e:
-                        logger.error(f"Failed updating disconnect bot row with transcript: {e}")
-                    finally:
-                        disconnect_bot_row_id = None
-                    await _flush_bot()
-                    continue
-
-                # Log transcript immediately; interruption is finalized when audio is attached.
-                record = await asyncio.to_thread(
-                    log_voice_message,
-                    submission_id,
-                    assignment_id,
-                    question_order,
-                    "assistant",
-                    content,
-                    attempt_number,
-                    None,
-                    None,
-                    False,
-                    timestamp,
-                    full_text,
-                )
-                if record and record.get("id"):
-                    pending_bot_rows.append({"id": record["id"]})
-                await _flush_bot()
-            else:
-                logger.debug(f"Ignoring transcript update message with role={role!r}")
+        transcript_counter["bot"] += 1
+        utterance_id = f"{submission_id}:{question_order}:{attempt_number}:bot:{transcript_counter['bot']}"
+        logger.debug(f"Assistant turn stopped #{transcript_counter['bot']}: {content[:80] if content else '(empty)'}...")
+        record = await asyncio.to_thread(
+            log_voice_message,
+            submission_id,
+            assignment_id,
+            question_order,
+            "assistant",
+            content,
+            attempt_number,
+            None,
+            None,
+            False,
+            spoken_at,
+            full_text,
+            utterance_id,
+        )
+        if not record or not record.get("id"):
+            return
+        async with bot_flush_lock:
+            bot_transcripts[utterance_id] = {"id": record["id"]}
+            audio_item = bot_audio.pop(utterance_id, None)
+        if audio_item:
+            _track_task(asyncio.create_task(_attach_bot_audio({"id": record["id"]}, audio_item)))
 
     # Frame handlers for bot speaking state (proper interruption detection)
     @task.event_handler("on_frame_reached_upstream")
@@ -582,12 +556,10 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
-        nonlocal full_assistant_text_queue
-        nonlocal is_disconnecting, disconnect_bot_row_id
+        nonlocal full_assistant_text_queue, is_disconnecting, disconnect_bot_row_id, session_chunk_counter
         logger.info(f"Client ready - starting conversation")
         await rtvi.set_bot_ready()
         
-        # Start audio recording
         if submission_id:
             await audiobuffer.start_recording()
             transcript_counter["user"] = 0
@@ -597,10 +569,11 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             full_assistant_text_queue.clear()
             is_disconnecting = False
             disconnect_bot_row_id = None
-            pending_user_audio_queue.clear()
-            pending_bot_audio_queue.clear()
-            pending_user_rows.clear()
-            pending_bot_rows.clear()
+            user_transcripts.clear()
+            user_audio.clear()
+            bot_transcripts.clear()
+            bot_audio.clear()
+            session_chunk_counter = 0
             bot_state["speaking"] = False
             bot_state["current_bot_interrupted"] = False
             logger.info(f"Audio recording started for submission {submission_id}")
@@ -643,25 +616,28 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             except Exception as e:
                 logger.warning(f"Error stopping recording: {e}")
             
-            # Wait briefly for AudioBufferProcessor turn events to enqueue audio.
-            # In practice, bot/user turn audio can arrive slightly AFTER stop_recording returns.
-            for _ in range(30):  # up to ~3s
-                if pending_user_audio_queue and pending_user_rows:
+            # Wait briefly for turn events / audio to enqueue after stop_recording
+            for _ in range(30):
+                if any(uid in user_audio for uid in user_transcripts):
                     break
-                if pending_bot_audio_queue and pending_bot_rows:
+                if any(uid in bot_audio for uid in bot_transcripts):
                     break
-                # If we were specifically mid-bot-speech, wait until we see *some* bot audio
-                if bot_was_speaking_on_disconnect and pending_bot_audio_queue:
+                if bot_was_speaking_on_disconnect and bot_audio:
                     break
                 await asyncio.sleep(0.1)
 
-            # If bot was speaking at disconnect, we might never receive the assistant transcript (spoken text).
-            # Ensure we have exactly ONE row representing this utterance:
-            # - Prefer reusing the latest pending bot row (if any)
-            # - Otherwise create a placeholder row (content="") with generated_content
+            # Bot was speaking at disconnect: ensure one row for in-flight utterance
             if bot_was_speaking_on_disconnect and assignment_id and disconnect_bot_row_id is None:
-                if pending_bot_rows:
-                    disconnect_bot_row_id = pending_bot_rows[-1]["id"]
+                # Reuse latest pending bot row (by ordinal) or create placeholder
+                bot_uid_keys = [k for k in bot_transcripts if ":bot:" in k]
+                if bot_uid_keys:
+                    def _bot_ordinal(k):
+                        try:
+                            return int(k.split(":")[-1])
+                        except (IndexError, ValueError):
+                            return 0
+                    latest_uid = max(bot_uid_keys, key=_bot_ordinal)
+                    disconnect_bot_row_id = bot_transcripts[latest_uid]["id"]
                     try:
                         await asyncio.to_thread(update_voice_message_interrupted, disconnect_bot_row_id, True)
                         logger.info("Marked latest pending bot row interrupted on disconnect")
@@ -669,15 +645,13 @@ The text you generate will be used by TTS to speak to the student, so don't incl
                         logger.error(f"Error marking pending bot row interrupted: {e}")
                 else:
                     spoken_at = datetime.now(timezone.utc).isoformat()
-                    generated = ""
-                    if full_assistant_text_queue:
-                        generated = full_assistant_text_queue.popleft()
-                    else:
+                    generated = full_assistant_text_queue.popleft() if full_assistant_text_queue else ""
+                    if not generated:
                         for msg in reversed(messages):
                             if msg.get("role") == "assistant":
                                 generated = msg.get("content", "") or ""
                                 break
-
+                    placeholder_uid = f"{submission_id}:{question_order}:{attempt_number}:bot:{audio_counter['bot'] + 1}"
                     try:
                         record = await asyncio.to_thread(
                             log_voice_message,
@@ -692,115 +666,52 @@ The text you generate will be used by TTS to speak to the student, so don't incl
                             True,
                             spoken_at,
                             generated or None,
+                            placeholder_uid,
                         )
                         if record and record.get("id"):
                             disconnect_bot_row_id = record["id"]
-                            pending_bot_rows.append({"id": record["id"]})
+                            bot_transcripts[placeholder_uid] = {"id": record["id"]}
                             logger.info("Logged interrupted bot row on disconnect (no spoken transcript yet)")
                     except Exception as e:
                         logger.error(f"Error logging interrupted bot row on disconnect: {e}")
 
-            # Backwards-compat: old placeholder insertion block removed (handled above)
-            if False and bot_was_speaking_on_disconnect and assignment_id:
-                spoken_at = datetime.now(timezone.utc).isoformat()
-                generated = ""
-                if full_assistant_text_queue:
-                    generated = full_assistant_text_queue.popleft()
-                else:
-                    # Fallback: last assistant message in context (if any)
-                    for msg in reversed(messages):
-                        if msg.get("role") == "assistant":
-                            generated = msg.get("content", "") or ""
-                            break
-
-                try:
-                    record = await asyncio.to_thread(
-                        log_voice_message,
-                        submission_id,
-                        assignment_id,
-                        question_order,
-                        "assistant",
-                        "",  # spoken content unknown (disconnect mid-speech)
-                        attempt_number,
-                        None,
-                        None,
-                        True,  # interrupted
-                        spoken_at,
-                        generated or None,
-                    )
-                    if record and record.get("id"):
-                        pending_bot_rows.append({"id": record["id"]})
-                        logger.info("Logged interrupted bot row on disconnect (no spoken transcript yet)")
-                except Exception as e:
-                    logger.error(f"Error logging interrupted bot row on disconnect: {e}")
-
-            # Try attaching any audio that arrived before disconnect
-            # (transcripts were already inserted in on_transcript_update)
+            # Flush: attach audio to rows by utterance_id
             async with user_flush_lock:
-                while pending_user_audio_queue and pending_user_rows:
-                    audio_item = pending_user_audio_queue.popleft()
-                    row = pending_user_rows.popleft()
-                    if not audio_item.get("wav_bytes"):
-                        logger.warning(f"Skipping empty user audio #{audio_item.get('audio_num')} on disconnect")
-                        continue
-                    path = generate_audio_path(
-                        submission_id, question_order, attempt_number, "user", audio_item["audio_num"]
-                    )
-                    audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
-                    await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, None)
-
+                for uid in list(user_transcripts.keys()):
+                    audio_item = user_audio.pop(uid, None)
+                    if audio_item:
+                        row = user_transcripts.pop(uid)
+                        _track_task(asyncio.create_task(_attach_user_audio(row, audio_item)))
             async with bot_flush_lock:
-                while pending_bot_audio_queue and pending_bot_rows:
-                    audio_item = pending_bot_audio_queue.popleft()
-                    row = pending_bot_rows.popleft()
-                    interrupted = audio_item.get("interrupted", False)
-                    if not audio_item.get("wav_bytes"):
-                        # No audio bytes - still update interruption flag on the row
-                        await asyncio.to_thread(update_voice_message_interrupted, row["id"], interrupted or True)
-                        logger.warning(f"Bot audio #{audio_item.get('audio_num')} empty; updated interrupted only")
-                        continue
-                    path = generate_audio_path(
-                        submission_id, question_order, attempt_number, "bot", audio_item["audio_num"]
-                    )
-                    audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
-                    await asyncio.to_thread(
-                        update_voice_message_audio,
-                        row["id"],
-                        audio_url,
-                        None,
-                        interrupted,
-                    )
+                for uid in list(bot_transcripts.keys()):
+                    audio_item = bot_audio.pop(uid, None)
+                    if audio_item:
+                        row = bot_transcripts.pop(uid)
+                        _track_task(asyncio.create_task(_attach_bot_audio(row, audio_item)))
 
-            # One more short wait + flush: sometimes the bot turn chunk is enqueued after the first flush.
-            if bot_was_speaking_on_disconnect and pending_bot_rows and not pending_bot_audio_queue:
-                for _ in range(15):  # up to ~1.5s
-                    if pending_bot_audio_queue:
+            if bot_was_speaking_on_disconnect and bot_transcripts and not bot_audio:
+                for _ in range(15):
+                    if bot_audio:
                         break
                     await asyncio.sleep(0.1)
                 async with bot_flush_lock:
-                    while pending_bot_audio_queue and pending_bot_rows:
-                        audio_item = pending_bot_audio_queue.popleft()
-                        row = pending_bot_rows.popleft()
-                        interrupted = audio_item.get("interrupted", False) or True
-                        if not audio_item.get("wav_bytes"):
-                            await asyncio.to_thread(update_voice_message_interrupted, row["id"], True)
-                            continue
-                        path = generate_audio_path(
-                            submission_id, question_order, attempt_number, "bot", audio_item["audio_num"]
-                        )
-                        audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
-                        await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, interrupted)
+                    for uid in list(bot_transcripts.keys()):
+                        audio_item = bot_audio.pop(uid, None)
+                        if audio_item:
+                            row = bot_transcripts.pop(uid)
+                            _track_task(asyncio.create_task(_attach_bot_audio(row, audio_item)))
 
-            # Best-effort wait for background upload/log tasks so we don't exit
             if background_tasks:
                 await asyncio.gather(*list(background_tasks), return_exceptions=True)
 
-            # If we have audio but never got transcripts (rare), log placeholders without transcript.
-            while pending_user_audio_queue:
-                audio_item = pending_user_audio_queue.popleft()
+            # Remaining audio without transcript: insert placeholder row and attach
+            async with user_flush_lock:
+                remaining_user = list(user_audio.items())
+                for uid in (k for k, _ in remaining_user):
+                    user_audio.pop(uid, None)
+            for uid, audio_item in remaining_user:
                 try:
                     if not audio_item.get("wav_bytes"):
-                        logger.warning(f"Dropping empty user audio #{audio_item.get('audio_num')} on disconnect")
                         continue
                     path = generate_audio_path(
                         submission_id, question_order, attempt_number, "user", audio_item["audio_num"]
@@ -819,18 +730,21 @@ The text you generate will be used by TTS to speak to the student, so don't incl
                         None,
                         False,
                         spoken_at,
+                        None,
+                        uid,
                     )
-                    logger.warning(f"Logged user audio without transcript on disconnect (audio #{audio_item['audio_num']})")
+                    logger.warning(f"Logged user audio without transcript on disconnect (audio #{audio_item.get('audio_num')})")
                 except Exception as e:
                     logger.error(f"Error saving user audio on disconnect: {e}")
 
-            while pending_bot_audio_queue:
-                audio_item = pending_bot_audio_queue.popleft()
+            async with bot_flush_lock:
+                remaining_bot = [(uid, audio_item, bot_transcripts.pop(uid, None)) for uid, audio_item in list(bot_audio.items())]
+                for uid, _ in remaining_bot:
+                    bot_audio.pop(uid, None)
+            for uid, audio_item, row in remaining_bot:
                 try:
                     spoken_at = datetime.now(timezone.utc).isoformat()
-                    # If we have a pending bot row, attach audio to it instead of inserting a new row.
-                    if pending_bot_rows:
-                        row = pending_bot_rows.popleft()
+                    if row:
                         interrupted = audio_item.get("interrupted", False) or bot_was_speaking_on_disconnect
                         if not audio_item.get("wav_bytes"):
                             await asyncio.to_thread(update_voice_message_interrupted, row["id"], True)
@@ -840,11 +754,9 @@ The text you generate will be used by TTS to speak to the student, so don't incl
                         )
                         audio_url = await asyncio.to_thread(upload_audio, audio_item["wav_bytes"], path)
                         await asyncio.to_thread(update_voice_message_audio, row["id"], audio_url, None, interrupted)
-                        logger.warning(f"Attached bot audio without transcript on disconnect to existing row (audio #{audio_item.get('audio_num')})")
+                        logger.warning(f"Attached bot audio without transcript on disconnect to existing row")
                         continue
-
                     if not audio_item.get("wav_bytes"):
-                        # No audio to upload; still log a placeholder row as interrupted.
                         await asyncio.to_thread(
                             log_voice_message,
                             submission_id,
@@ -857,10 +769,10 @@ The text you generate will be used by TTS to speak to the student, so don't incl
                             None,
                             True,
                             spoken_at,
+                            None,
+                            uid,
                         )
-                        logger.warning(f"Logged bot placeholder (no audio) on disconnect (audio #{audio_item.get('audio_num')})")
                         continue
-
                     path = generate_audio_path(
                         submission_id, question_order, attempt_number, "bot", audio_item["audio_num"]
                     )
@@ -877,8 +789,10 @@ The text you generate will be used by TTS to speak to the student, so don't incl
                         None,
                         True,
                         spoken_at,
+                        None,
+                        uid,
                     )
-                    logger.warning(f"Logged bot audio without transcript on disconnect (audio #{audio_item['audio_num']})")
+                    logger.warning(f"Logged bot audio without transcript on disconnect (audio #{audio_item.get('audio_num')})")
                 except Exception as e:
                     logger.error(f"Error saving bot audio on disconnect: {e}")
         
@@ -888,51 +802,70 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         )
         await task.cancel()
     
-    # Per-utterance audio recording handlers
+    # Per-utterance audio recording handlers (ID-based correlation)
     @audiobuffer.event_handler("on_user_turn_audio_data")
     async def on_user_turn_audio_data(buffer, audio, sample_rate, num_channels):
-        """Handle each user (student) utterance - fires when student stops speaking."""
+        """Store user audio by utterance_id; attach to row if transcript already present."""
         if not submission_id or not assignment_id:
-            logger.warning("Missing submission_id or assignment_id, skipping audio logging")
             return
-
         audio_counter["user"] += 1
         audio_num = audio_counter["user"]
-        
+        utterance_id = f"{submission_id}:{question_order}:{attempt_number}:user:{audio_num}"
         try:
-            # Convert to WAV bytes
             wav_bytes = audio_to_wav(audio, sample_rate, num_channels)
-            pending_user_audio_queue.append({"audio_num": audio_num, "wav_bytes": wav_bytes})
-            logger.debug(f"Queued user audio (q={len(pending_user_audio_queue)}) audio #{audio_num}")
-            
+            audio_item = {"audio_num": audio_num, "wav_bytes": wav_bytes}
+            async with user_flush_lock:
+                user_audio[utterance_id] = audio_item
+                row = user_transcripts.pop(utterance_id, None)
+                if row:
+                    audio_item = user_audio.pop(utterance_id, None)
+            if row and audio_item:
+                _track_task(asyncio.create_task(_attach_user_audio(row, audio_item)))
+            else:
+                logger.debug(f"Queued user audio (utterance_id={utterance_id})")
         except Exception as e:
             logger.error(f"Error handling user audio #{audio_num}: {e}")
-    
+
     @audiobuffer.event_handler("on_bot_turn_audio_data")
     async def on_bot_turn_audio_data(buffer, audio, sample_rate, num_channels):
-        """Handle each bot (teacher) utterance - fires when bot stops speaking."""
-        # Check if this utterance was interrupted (set by UserStartedSpeakingFrame while bot was speaking)
+        """Store bot audio by utterance_id; attach to row if transcript already present."""
         was_interrupted = bot_state["current_bot_interrupted"]
-        
         if not submission_id or not assignment_id:
-            logger.warning("Missing submission_id or assignment_id, skipping audio logging")
             return
-        
         audio_counter["bot"] += 1
         audio_num = audio_counter["bot"]
-        
+        utterance_id = f"{submission_id}:{question_order}:{attempt_number}:bot:{audio_num}"
         try:
-            # Convert to WAV bytes
             wav_bytes = audio_to_wav(audio, sample_rate, num_channels)
-            pending_bot_audio_queue.append(
-                {"audio_num": audio_num, "wav_bytes": wav_bytes, "interrupted": was_interrupted}
-            )
-            logger.debug(
-                f"Queued bot audio (q={len(pending_bot_audio_queue)}) audio #{audio_num}, interrupted={was_interrupted}"
-            )
-            
+            audio_item = {"audio_num": audio_num, "wav_bytes": wav_bytes, "interrupted": was_interrupted}
+            async with bot_flush_lock:
+                bot_audio[utterance_id] = audio_item
+                row = bot_transcripts.pop(utterance_id, None)
+                if row:
+                    audio_item = bot_audio.pop(utterance_id, None)
+            if row and audio_item:
+                _track_task(asyncio.create_task(_attach_bot_audio(row, audio_item)))
+            else:
+                logger.debug(f"Queued bot audio (utterance_id={utterance_id}), interrupted={was_interrupted}")
         except Exception as e:
             logger.error(f"Error handling bot audio #{audio_num}: {e}")
+
+    @audiobuffer.event_handler("on_audio_data")
+    async def on_session_audio_data(buffer, audio, sample_rate, num_channels):
+        """Upload composite session chunk (60s) and append URL to submission_session_audio."""
+        if not submission_id or not assignment_id:
+            return
+        nonlocal session_chunk_counter
+        try:
+            session_chunk_counter += 1
+            chunk_index = session_chunk_counter
+            wav_bytes = audio_to_wav(audio, sample_rate, num_channels)
+            path = generate_session_audio_chunk_path(submission_id, question_order, attempt_number, chunk_index)
+            audio_url = await asyncio.to_thread(upload_audio, wav_bytes, path)
+            await asyncio.to_thread(append_session_audio_chunk, submission_id, question_order, attempt_number, audio_url)
+            logger.info(f"Session composite chunk #{chunk_index} uploaded for {submission_id}/{question_order}/{attempt_number}")
+        except Exception as e:
+            logger.error(f"Error uploading session audio chunk: {e}")
 
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
@@ -947,6 +880,8 @@ async def bot(runner_args: RunnerArguments):
     supabase_env = body.get("supabase_env")
     effective_env = supabase_env or os.getenv("SUPABASE_ENV", "development")
     use_krisp_filter = effective_env == "production"
+    running_locally = os.getenv("RUN_LOCAL", "0").lower() in ("1", "true")
+    use_krisp_filter = use_krisp_filter and not running_locally
     krisp_filter = None
     if use_krisp_filter:
         from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter

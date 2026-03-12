@@ -95,3 +95,15 @@ def generate_audio_path(
     safe_submission_id = submission_id.replace("/", "_").replace("\\", "_")
     
     return f"voice-recordings/{safe_submission_id}/{question_order}/{attempt_number}/{role}-{utterance_num}.{extension}"
+
+
+def generate_session_audio_chunk_path(
+    submission_id: str,
+    question_order: int,
+    attempt_number: int,
+    chunk_index: int,
+    extension: str = "wav",
+) -> str:
+    """Generate path for a session composite audio chunk (60-second chunks)."""
+    safe_submission_id = submission_id.replace("/", "_").replace("\\", "_")
+    return f"voice-recordings/{safe_submission_id}/{question_order}/{attempt_number}/session_composite_chunk_{chunk_index:03d}.{extension}"

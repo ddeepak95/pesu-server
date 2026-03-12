@@ -97,6 +97,7 @@ def log_voice_message(
     interrupted: bool = False,
     spoken_at: Optional[str] = None,
     generated_content: Optional[str] = None,
+    utterance_id: Optional[str] = None,
 ) -> dict:
     """Log a voice message to the voice_messages table in Supabase.
     
@@ -142,6 +143,9 @@ def log_voice_message(
 
     if generated_content is not None:
         data["generated_content"] = generated_content
+
+    if utterance_id is not None:
+        data["utterance_id"] = utterance_id
 
     try:
         result = supabase.table("voice_messages").insert(data).execute()
@@ -240,4 +244,50 @@ def update_voice_message_content(
         data["generated_content"] = generated_content
     result = supabase.table("voice_messages").update(data).eq("id", message_id).execute()
     logger.info(f"Updated voice message {message_id} content (len={len(content)})")
+    return result.data[0] if result.data else {}
+
+
+def append_session_audio_chunk(
+    submission_id: str,
+    question_order: int,
+    attempt_number: int,
+    chunk_url: str,
+) -> dict:
+    """Append a session composite audio chunk URL to submission_session_audio.
+    First chunk inserts a row; subsequent chunks append to composite_audio_chunk_urls array.
+    """
+    supabase = get_supabase()
+    # Try to fetch existing row
+    existing = (
+        supabase.table("submission_session_audio")
+        .select("composite_audio_chunk_urls")
+        .eq("submission_id", submission_id)
+        .eq("question_order", question_order)
+        .eq("attempt_number", attempt_number)
+        .execute()
+    )
+    if existing.data and len(existing.data) > 0:
+        current_urls = existing.data[0].get("composite_audio_chunk_urls") or []
+        new_urls = list(current_urls) + [chunk_url]
+        result = (
+            supabase.table("submission_session_audio")
+            .update({"composite_audio_chunk_urls": new_urls})
+            .eq("submission_id", submission_id)
+            .eq("question_order", question_order)
+            .eq("attempt_number", attempt_number)
+            .execute()
+        )
+        logger.info(f"Appended session audio chunk to {submission_id}/{question_order}/{attempt_number} (total {len(new_urls)} chunks)")
+    else:
+        result = (
+            supabase.table("submission_session_audio")
+            .insert({
+                "submission_id": submission_id,
+                "question_order": question_order,
+                "attempt_number": attempt_number,
+                "composite_audio_chunk_urls": [chunk_url],
+            })
+            .execute()
+        )
+        logger.info(f"Inserted first session audio chunk for {submission_id}/{question_order}/{attempt_number}")
     return result.data[0] if result.data else {}
