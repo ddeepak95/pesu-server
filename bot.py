@@ -26,6 +26,7 @@ Run the bot using::
 import asyncio
 import io
 import os
+from pyexpat import model
 import wave
 from collections import deque
 from datetime import datetime, timezone
@@ -67,6 +68,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     UserTurnStoppedMessage,
     AssistantTurnStoppedMessage,
+    LLMUserAggregatorParams,
 )
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
@@ -84,6 +86,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
+from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from LANGUAGE_CONSTANTS import LANGUAGES
 from firebase_storage import upload_audio, generate_audio_path, generate_session_audio_chunk_path
 from supabase_client import (
@@ -265,7 +268,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         params=input_params
     )
 
-    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), settings=OpenAILLMService.Settings(model="gpt-5-mini"))
 
     # Define end_conversation function schema
     # The description guides when the LLM should call this function
@@ -328,7 +331,20 @@ The text you generate will be used by TTS to speak to the student, so don't incl
     ]
 
     context = LLMContext(messages, tools=tools)
-    context_aggregator_pair = LLMContextAggregatorPair(context)
+    context_aggregator_pair = LLMContextAggregatorPair(context,
+    user_params = LLMUserAggregatorParams(
+        filter_incomplete_user_turns=True,
+        user_turn_completion_config=UserTurnCompletionConfig(
+            incomplete_short_timeout=7.0,
+            incomplete_long_timeout=12.0,
+            incomplete_short_prompt="""The user paused briefly.
+Generate a contextual prompt encouraging them to continue. Offer them any help they need. Keep the prompt very very short and concise.
+Respond with ✓ followed by your message.""",
+            incomplete_long_prompt="""The user has been quiet for a while.
+Generate a contextual prompt encouraging them to continue. Offer them any help they need. Keep the prompt very very short and concise.
+Respond with ✓ followed by your message.""",
+        ),
+    ))
     user_aggregator = context_aggregator_pair.user()
     assistant_aggregator = context_aggregator_pair.assistant()
 
@@ -365,8 +381,8 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             await self.push_frame(frame, direction)
     
     # Sample rate for buffer_size and WAV conversion (Pipecat/Daily typically 24kHz or 16kHz)
-    SAMPLE_RATE = 24000
-    CHUNK_DURATION_SEC = 60
+    SAMPLE_RATE = 16000
+    CHUNK_DURATION_SEC = 120
     # Audio buffer: per-turn audio + 60-second composite chunks
     audiobuffer = AudioBufferProcessor(
         num_channels=1,
@@ -376,6 +392,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         buffer_size=SAMPLE_RATE * 2 * CHUNK_DURATION_SEC,  # 16-bit mono, 60s chunks
     )
     session_chunk_counter = 0
+    session_recording_started_at: str | None = None
 
     llm_full_capture = LLMFullResponseCaptureProcessor()
 
@@ -556,12 +573,13 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 
     @rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
-        nonlocal full_assistant_text_queue, is_disconnecting, disconnect_bot_row_id, session_chunk_counter
+        nonlocal full_assistant_text_queue, is_disconnecting, disconnect_bot_row_id, session_chunk_counter, session_recording_started_at
         logger.info(f"Client ready - starting conversation")
         await rtvi.set_bot_ready()
         
         if submission_id:
             await audiobuffer.start_recording()
+            session_recording_started_at = datetime.now(timezone.utc).isoformat()
             transcript_counter["user"] = 0
             transcript_counter["bot"] = 0
             audio_counter["user"] = 0
@@ -576,7 +594,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             session_chunk_counter = 0
             bot_state["speaking"] = False
             bot_state["current_bot_interrupted"] = False
-            logger.info(f"Audio recording started for submission {submission_id}")
+            logger.info(f"Audio recording started for submission {submission_id} at {session_recording_started_at}")
         
         # Determine greeting based on question order
         if custom_greeting:
@@ -862,7 +880,9 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             wav_bytes = audio_to_wav(audio, sample_rate, num_channels)
             path = generate_session_audio_chunk_path(submission_id, question_order, attempt_number, chunk_index)
             audio_url = await asyncio.to_thread(upload_audio, wav_bytes, path)
-            await asyncio.to_thread(append_session_audio_chunk, submission_id, question_order, attempt_number, audio_url)
+            # Pass recording_started_at only for the first chunk (inserted as a new row)
+            started_at = session_recording_started_at if chunk_index == 1 else None
+            await asyncio.to_thread(append_session_audio_chunk, submission_id, question_order, attempt_number, audio_url, started_at)
             logger.info(f"Session composite chunk #{chunk_index} uploaded for {submission_id}/{question_order}/{attempt_number}")
         except Exception as e:
             logger.error(f"Error uploading session audio chunk: {e}")

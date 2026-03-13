@@ -252,9 +252,11 @@ def append_session_audio_chunk(
     question_order: int,
     attempt_number: int,
     chunk_url: str,
+    recording_started_at: Optional[str] = None,
 ) -> dict:
     """Append a session composite audio chunk URL to submission_session_audio.
     First chunk inserts a row; subsequent chunks append to composite_audio_chunk_urls array.
+    recording_started_at is only written on the first insert (row creation).
     """
     supabase = get_supabase()
     # Try to fetch existing row
@@ -279,15 +281,18 @@ def append_session_audio_chunk(
         )
         logger.info(f"Appended session audio chunk to {submission_id}/{question_order}/{attempt_number} (total {len(new_urls)} chunks)")
     else:
+        insert_data: dict = {
+            "submission_id": submission_id,
+            "question_order": question_order,
+            "attempt_number": attempt_number,
+            "composite_audio_chunk_urls": [chunk_url],
+        }
+        if recording_started_at is not None:
+            insert_data["recording_started_at"] = recording_started_at
         result = (
             supabase.table("submission_session_audio")
-            .insert({
-                "submission_id": submission_id,
-                "question_order": question_order,
-                "attempt_number": attempt_number,
-                "composite_audio_chunk_urls": [chunk_url],
-            })
+            .insert(insert_data)
             .execute()
         )
-        logger.info(f"Inserted first session audio chunk for {submission_id}/{question_order}/{attempt_number}")
+        logger.info(f"Inserted first session audio chunk for {submission_id}/{question_order}/{attempt_number}, recording_started_at={recording_started_at}")
     return result.data[0] if result.data else {}
