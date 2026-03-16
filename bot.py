@@ -26,7 +26,6 @@ Run the bot using::
 import asyncio
 import io
 import os
-from pyexpat import model
 import wave
 from collections import deque
 from datetime import datetime, timezone
@@ -37,16 +36,11 @@ from loguru import logger
 print("🚀 Starting Pipecat bot...")
 print("⏳ Loading models and imports (20 seconds, first run only)\n")
 
-logger.info("Loading Local Smart Turn Analyzer V3...")
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-
-logger.info("✅ Local Smart Turn Analyzer V3 loaded")
 logger.info("Loading Silero VAD model...")
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 
 logger.info("✅ Silero VAD model loaded")
 
-from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     LLMRunFrame,
     BotStartedSpeakingFrame,
@@ -331,20 +325,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
     ]
 
     context = LLMContext(messages, tools=tools)
-    context_aggregator_pair = LLMContextAggregatorPair(context,
-    user_params = LLMUserAggregatorParams(
-        filter_incomplete_user_turns=True,
-        user_turn_completion_config=UserTurnCompletionConfig(
-            incomplete_short_timeout=7.0,
-            incomplete_long_timeout=12.0,
-            incomplete_short_prompt="""The user paused briefly.
-Generate a contextual prompt encouraging them to continue. Offer them any help they need. Keep the prompt very very short and concise.
-Respond with ✓ followed by your message.""",
-            incomplete_long_prompt="""The user has been quiet for a while.
-Generate a contextual prompt encouraging them to continue. Offer them any help they need. Keep the prompt very very short and concise.
-Respond with ✓ followed by your message.""",
-        ),
-    ))
+    context_aggregator_pair = LLMContextAggregatorPair(context)
     user_aggregator = context_aggregator_pair.user()
     assistant_aggregator = context_aggregator_pair.assistant()
 
@@ -382,7 +363,7 @@ Respond with ✓ followed by your message.""",
     
     # Sample rate for buffer_size and WAV conversion (Pipecat/Daily typically 24kHz or 16kHz)
     SAMPLE_RATE = 16000
-    CHUNK_DURATION_SEC = 120
+    CHUNK_DURATION_SEC = 60
     # Audio buffer: per-turn audio + 60-second composite chunks
     audiobuffer = AudioBufferProcessor(
         num_channels=1,

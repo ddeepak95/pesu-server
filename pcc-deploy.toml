@@ -1,5 +1,5 @@
 agent_name = "pesu-pipecat"
-image = "ddeepak95/pesu-pipecat:0.3"
+image = "ddeepak95/pesu-pipecat:0.4"
 secret_set = "pesu-pipecat-secrets"
 agent_profile = "agent-1x"
 
@@ -9,3 +9,6 @@ agent_profile = "agent-1x"
 
 [krisp_viva]
 audio_filter = "tel"
+
+[scaling]
+min_agents = 1
