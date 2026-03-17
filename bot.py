@@ -179,7 +179,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # Build prompt based on whether it's an assessment or general conversation
     # TTS instruction to append for voice mode
-    TTS_INSTRUCTION = "\n\nThe text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly."
+    TTS_INSTRUCTION = "\n\nThe text you generate will be used for text to speech conversion, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses very short with no more than 10 words. More conversational turns are better than longer responses from your side. For bilingual conversations, use the English words directly in the dialogue when English terms are used in the conversation instead of putting them in brackets and write the English words using English alphabet."
     
     if custom_system_prompt:
         # New path: Use frontend-provided prompt (already interpolated)
@@ -220,9 +220,9 @@ NORMAL ASSESSMENT FLOW (after question is explained):
 4. Help them elaborate if they're stuck, but don't give away the answer
 5. Keep the questions short and concise
 6. Keep your responses very short and concise and conversational.
-7. Use English for concept-specific words while keeping the conversation in {language_name}
+7. Always use English for concept-specific & technical words while keeping the discussions in {language_name}
 
-The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly.
+{TTS_INSTRUCTION}
 """
         else:
             # For subsequent questions, use the original prompt structure
@@ -241,14 +241,14 @@ Your role:
 4. Be encouraging and supportive
 5. Help them elaborate if they're stuck, but don't give away the answer
 6. Keep the questions short and concise.
-7. Use English for concept-specific words while keeping the conversation in {language_name}.
+7. Always use English for concept-specific & technical words while keeping the discussions in {language_name}
 
-The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses concise and conversational.
+{TTS_INSTRUCTION}
 """
     else:
         # General conversation mode (legacy)
         topic_arg = body.get("topic", "newton's laws of motion and gravity")
-        prompt = f"""You are a friendly science teacher who speaks in {language_name}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
+        prompt = f"""You are a friendly science teacher who speaks in {language_name}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. Ask conceptual questions to check the student's understanding of the concepts. {TTS_INSTRUCTION}
 """
 
     cartesia_language = language_to_cartesia_language(language)
