@@ -26,6 +26,7 @@ Run the bot using::
 import asyncio
 import io
 import os
+from pydoc import text
 import wave
 from collections import deque
 from datetime import datetime, timezone
@@ -70,6 +71,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService, language_to_cartesia_language
+from pipecat.services.tts_service import TextAggregationMode
 from pipecat.services.cartesia.stt import CartesiaSTTService, CartesiaLiveOptions
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -259,10 +261,16 @@ The text you generate will be used by TTS to speak to the student, so don't incl
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=cartesia_voice_id,
-        params=input_params
+        params=input_params,
+        text_aggregation_mode=TextAggregationMode.TOKEN,
     )
-
-    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), settings=OpenAILLMService.Settings(model="gpt-5-mini"))
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        settings=OpenAILLMService.Settings(
+            model="gpt-4o",
+            max_completion_tokens=250,
+        ),
+    )
 
     # Define end_conversation function schema
     # The description guides when the LLM should call this function
@@ -363,7 +371,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
     
     # Sample rate for buffer_size and WAV conversion (Pipecat/Daily typically 24kHz or 16kHz)
     SAMPLE_RATE = 16000
-    CHUNK_DURATION_SEC = 60
+    CHUNK_DURATION_SEC = 30
     # Audio buffer: per-turn audio + 60-second composite chunks
     audiobuffer = AudioBufferProcessor(
         num_channels=1,
@@ -396,7 +404,6 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
-            enable_usage_metrics=True,
             # Without this, Pipecat will detect interruption frames but won't stop bot speech.
             allow_interruptions=True,
         ),
@@ -436,7 +443,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
-        """Create voice_messages row from turn event and attach audio if already available."""
+        """Create voice_messages row from turn event and attach audio if already available (async, non-blocking)."""
         if not submission_id or not assignment_id:
             return
         transcript_counter["user"] += 1
@@ -448,28 +455,32 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             spoken_at = getattr(timestamp, "isoformat", lambda: datetime.now(timezone.utc).isoformat())()
         content = (getattr(message, "content", None) or "").strip()
         logger.debug(f"User turn stopped #{transcript_counter['user']}: {content[:80] if content else '(empty)'}...")
-        record = await asyncio.to_thread(
-            log_voice_message,
-            submission_id,
-            assignment_id,
-            question_order,
-            "student",
-            content,
-            attempt_number,
-            None,
-            None,
-            False,
-            spoken_at,
-            None,
-            utterance_id,
-        )
-        if not record or not record.get("id"):
-            return
-        async with user_flush_lock:
-            user_transcripts[utterance_id] = {"id": record["id"]}
-            audio_item = user_audio.pop(utterance_id, None)
-        if audio_item:
-            _track_task(asyncio.create_task(_attach_user_audio({"id": record["id"]}, audio_item)))
+
+        async def _log_user_turn():
+            record = await asyncio.to_thread(
+                log_voice_message,
+                submission_id,
+                assignment_id,
+                question_order,
+                "student",
+                content,
+                attempt_number,
+                None,
+                None,
+                False,
+                spoken_at,
+                None,
+                utterance_id,
+            )
+            if not record or not record.get("id"):
+                return
+            async with user_flush_lock:
+                user_transcripts[utterance_id] = {"id": record["id"]}
+                audio_item = user_audio.pop(utterance_id, None)
+            if audio_item:
+                _track_task(asyncio.create_task(_attach_user_audio({"id": record["id"]}, audio_item)))
+
+        _track_task(asyncio.create_task(_log_user_turn()))
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn_stopped(aggregator, message: AssistantTurnStoppedMessage):
@@ -496,28 +507,32 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         transcript_counter["bot"] += 1
         utterance_id = f"{submission_id}:{question_order}:{attempt_number}:bot:{transcript_counter['bot']}"
         logger.debug(f"Assistant turn stopped #{transcript_counter['bot']}: {content[:80] if content else '(empty)'}...")
-        record = await asyncio.to_thread(
-            log_voice_message,
-            submission_id,
-            assignment_id,
-            question_order,
-            "assistant",
-            content,
-            attempt_number,
-            None,
-            None,
-            False,
-            spoken_at,
-            full_text,
-            utterance_id,
-        )
-        if not record or not record.get("id"):
-            return
-        async with bot_flush_lock:
-            bot_transcripts[utterance_id] = {"id": record["id"]}
-            audio_item = bot_audio.pop(utterance_id, None)
-        if audio_item:
-            _track_task(asyncio.create_task(_attach_bot_audio({"id": record["id"]}, audio_item)))
+
+        async def _log_bot_turn():
+            record = await asyncio.to_thread(
+                log_voice_message,
+                submission_id,
+                assignment_id,
+                question_order,
+                "assistant",
+                content,
+                attempt_number,
+                None,
+                None,
+                False,
+                spoken_at,
+                full_text,
+                utterance_id,
+            )
+            if not record or not record.get("id"):
+                return
+            async with bot_flush_lock:
+                bot_transcripts[utterance_id] = {"id": record["id"]}
+                audio_item = bot_audio.pop(utterance_id, None)
+            if audio_item:
+                _track_task(asyncio.create_task(_attach_bot_audio({"id": record["id"]}, audio_item)))
+
+        _track_task(asyncio.create_task(_log_bot_turn()))
 
     # Frame handlers for bot speaking state (proper interruption detection)
     @task.event_handler("on_frame_reached_upstream")
