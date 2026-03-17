@@ -263,23 +263,23 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         params=input_params,
         text_aggregation_mode=TextAggregationMode.TOKEN,
     )
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(
-            model="gpt-4o",
-            max_completion_tokens=250,
-        ),
-    )
-
-
-
-    # llm = GoogleLLMService(
-    #     api_key=os.getenv("GEMINI_API_KEY"),
-    #     settings=GoogleLLMService.Settings(
-    #         model="gemini-2.5-flash",
-    #         thinking = GoogleThinkingConfig(thinking_budget = 0)
+    # llm = OpenAILLMService(
+    #     api_key=os.getenv("OPENAI_API_KEY"),
+    #     settings=OpenAILLMService.Settings(
+    #         model="gpt-4o",
+    #         max_completion_tokens=250,
     #     ),
     # )
+
+
+
+    llm = GoogleLLMService(
+        api_key=os.getenv("GEMINI_API_KEY"),
+        settings=GoogleLLMService.Settings(
+            model="gemini-2.5-flash",
+            thinking = GoogleThinkingConfig(thinking_budget = 0)
+        ),
+    )
 
     # Define end_conversation function schema
     # The description guides when the LLM should call this function
