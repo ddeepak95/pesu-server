@@ -69,17 +69,14 @@ from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIPro
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
-from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService, language_to_cartesia_language
 from pipecat.services.tts_service import TextAggregationMode
-from pipecat.services.cartesia.stt import CartesiaSTTService, CartesiaLiveOptions
-from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
@@ -130,7 +127,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         set_supabase_env(supabase_env)
         logger.info(f"Supabase environment override applied: {supabase_env}")
     
-    language_arg = body.get("language", "en")
+    language_key = body.get("language", "en")
     
     # Check if this is an assessment question or a general topic
     question_prompt = body.get("question_prompt")
@@ -175,8 +172,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # current_bot_interrupted: set to True when user starts speaking while bot is speaking
     bot_state = {"speaking": False, "current_bot_interrupted": False}
     
-    language = LANGUAGES[language_arg]["pipecat_language"]
-    cartesia_voice_id = LANGUAGES[language_arg]["cartesia_voice_id"]
+    language = LANGUAGES[language_key]["pipecat_language"]
+    language_name = LANGUAGES[language_key]["name"]
+    cartesia_voice_id = LANGUAGES[language_key]["cartesia_voice_id"]
 
     # Build prompt based on whether it's an assessment or general conversation
     # TTS instruction to append for voice mode
@@ -193,7 +191,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         
         # Build prompt with two-phase instructions for first question
         if question_order == 0:
-            prompt = f"""You are a teacher conducting a voice-based formative assessment in {language.value}. Your name is Konvo.
+            prompt = f"""You are a teacher conducting a voice-based formative assessment in {language_name}. Your name is Konvo.
 
 The student needs to answer this question:
 {question_prompt}
@@ -203,7 +201,7 @@ Evaluation criteria:
 
 CONVERSATION FLOW (for first question only):
 Phase 1 - Introduction:
-1. Introduce yourself as "Konvo" in {language.value}
+1. Introduce yourself as "Konvo" in {language_name}
 2. Say: "We are going to do an activity today"
 3. Ask: "If you are ready to start, say that we can start"
 4. Wait for the student to acknowledge they are ready (they may say "yes", "ready", "let's start", "we can start", or similar phrases)
@@ -221,13 +219,13 @@ NORMAL ASSESSMENT FLOW (after question is explained):
 4. Help them elaborate if they're stuck, but don't give away the answer
 5. Keep the questions short and concise
 6. Keep your responses very short and concise and conversational.
-7. Use English for concept-specific words while keeping the conversation in {language.value}
+7. Use English for concept-specific words while keeping the conversation in {language_name}
 
 The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly.
 """
         else:
             # For subsequent questions, use the original prompt structure
-            prompt = f"""You are a teacher conducting a voice-based formative assessment in {language.value}. 
+            prompt = f"""You are a teacher conducting a voice-based formative assessment in {language_name}. 
 
 The student needs to answer this question:
 {question_prompt}
@@ -242,14 +240,14 @@ Your role:
 4. Be encouraging and supportive
 5. Help them elaborate if they're stuck, but don't give away the answer
 6. Keep the questions short and concise.
-7. Use English for concept-specific words while keeping the conversation in {language.value}.
+7. Use English for concept-specific words while keeping the conversation in {language_name}.
 
 The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses concise and conversational.
 """
     else:
         # General conversation mode (legacy)
         topic_arg = body.get("topic", "newton's laws of motion and gravity")
-        prompt = f"""You are a friendly science teacher who speaks in {language.value}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
+        prompt = f"""You are a friendly science teacher who speaks in {language_name}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. The text you generate will be used by TTS to speak to the student, so don't include any special characters or formatting. Use colloquial language and be friendly. Ask conceptual questions to check the student's understanding of the concepts.
 """
 
     cartesia_language = language_to_cartesia_language(language)
@@ -264,11 +262,20 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         params=input_params,
         text_aggregation_mode=TextAggregationMode.TOKEN,
     )
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(
-            model="gpt-4o",
-            max_completion_tokens=250,
+    # llm = OpenAILLMService(
+    #     api_key=os.getenv("OPENAI_API_KEY"),
+    #     settings=OpenAILLMService.Settings(
+    #         model="gpt-4o",
+    #         max_completion_tokens=250,
+    #     ),
+    # )
+
+
+
+    llm = GoogleLLMService(
+        api_key=os.getenv("GEMINI_API_KEY"),
+        settings=GoogleLLMService.Settings(
+            model="gemini-2.5-flash",
         ),
     )
 
@@ -599,13 +606,13 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             greeting = custom_greeting
         elif question_order == 0:
             # Legacy path: First question greeting
-            greeting = f"Speaking in {language.value}, start by introducing yourself as Konvo and tell that you are their teacher's assistant. Say that we are going to do an activity today. Explain that the student will take part by responding to your questions and they can also ask for doubts if any. Ask them to be in a quieter place to avoid disturbances and ask if the student is ready to start. Ask them to say 'yes' or 'ready' when they are ready to start. Wait for their acknowledgment before explaining the question."
+            greeting = f"Speaking in {language_name}, start by introducing yourself as Konvo and tell that you are their teacher's assistant. Say that we are going to do an activity today. Explain that the student will take part by responding to your questions and they can also ask for doubts if any. Ask them to be in a quieter place to avoid disturbances and ask if the student is ready to start. Ask them to say 'yes' or 'ready' when they are ready to start. Wait for their acknowledgment before explaining the question."
         else:
             # Legacy path: Subsequent question greeting
             # Convert order to ordinal (1 -> second, 2 -> third, etc.)
             ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
             ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
-            greeting = f"Speaking in {language.value}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
+            greeting = f"Speaking in {language_name}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
         
         # Start the conversation
         messages.append({"role": "system", "content": greeting})
