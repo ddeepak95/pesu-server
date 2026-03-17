@@ -71,7 +71,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.services.cartesia.tts import CartesiaTTSService, language_to_cartesia_language
 from pipecat.services.tts_service import TextAggregationMode
-from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.google.llm import GoogleLLMService, GoogleThinkingConfig
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.services.llm_service import FunctionCallParams
@@ -175,6 +175,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     language = LANGUAGES[language_key]["pipecat_language"]
     language_name = LANGUAGES[language_key]["name"]
     cartesia_voice_id = LANGUAGES[language_key]["cartesia_voice_id"]
+    static_greeting = LANGUAGES[language_key].get("greeting")
 
     # Build prompt based on whether it's an assessment or general conversation
     # TTS instruction to append for voice mode
@@ -262,22 +263,23 @@ The text you generate will be used by TTS to speak to the student, so don't incl
         params=input_params,
         text_aggregation_mode=TextAggregationMode.TOKEN,
     )
-    # llm = OpenAILLMService(
-    #     api_key=os.getenv("OPENAI_API_KEY"),
-    #     settings=OpenAILLMService.Settings(
-    #         model="gpt-4o",
-    #         max_completion_tokens=250,
-    #     ),
-    # )
-
-
-
-    llm = GoogleLLMService(
-        api_key=os.getenv("GEMINI_API_KEY"),
-        settings=GoogleLLMService.Settings(
-            model="gemini-2.5-flash",
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        settings=OpenAILLMService.Settings(
+            model="gpt-4o",
+            max_completion_tokens=250,
         ),
     )
+
+
+
+    # llm = GoogleLLMService(
+    #     api_key=os.getenv("GEMINI_API_KEY"),
+    #     settings=GoogleLLMService.Settings(
+    #         model="gemini-2.5-flash",
+    #         thinking = GoogleThinkingConfig(thinking_budget = 0)
+    #     ),
+    # )
 
     # Define end_conversation function schema
     # The description guides when the LLM should call this function
@@ -599,6 +601,14 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             bot_state["current_bot_interrupted"] = False
             logger.info(f"Audio recording started for submission {submission_id} at {session_recording_started_at}")
         
+        # Play a quick static greeting for the selected language while the LLM prepares its first response.
+        if static_greeting:
+            try:
+                logger.info(f"Playing static greeting for language {language_key}")
+                await task.queue_frames([TTSSpeakFrame(static_greeting)])
+            except Exception as e:
+                logger.error(f"Error playing static greeting for language {language_key}: {e}")
+        
         # Determine greeting based on question order
         if custom_greeting:
             # New path: Use frontend-provided greeting (already interpolated)
@@ -614,7 +624,7 @@ The text you generate will be used by TTS to speak to the student, so don't incl
             ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
             greeting = f"Speaking in {language_name}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
         
-        # Start the conversation
+        # Start the conversation (LLM-driven greeting/intro will follow the static greeting)
         messages.append({"role": "system", "content": greeting})
         # Note: bot_state["speaking"] will be set by BotStartedSpeakingFrame handler
         await task.queue_frames([LLMRunFrame()])
