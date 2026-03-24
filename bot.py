@@ -82,6 +82,7 @@ from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from LANGUAGE_CONSTANTS import LANGUAGES
 from firebase_storage import upload_audio, generate_audio_path, generate_session_audio_chunk_path
+from idle_handler import IdleHandler
 from supabase_client import (
     log_voice_message,
     update_voice_message_audio,
@@ -342,7 +343,10 @@ Your role:
     ]
 
     context = LLMContext(messages, tools=tools)
-    context_aggregator_pair = LLMContextAggregatorPair(context)
+    context_aggregator_pair = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(user_idle_timeout=30.0),
+    )
     user_aggregator = context_aggregator_pair.user()
     assistant_aggregator = context_aggregator_pair.assistant()
 
@@ -490,6 +494,16 @@ Your role:
                 _track_task(asyncio.create_task(_attach_user_audio({"id": record["id"]}, audio_item)))
 
         _track_task(asyncio.create_task(_log_user_turn()))
+
+    idle_handler = IdleHandler()
+
+    @user_aggregator.event_handler("on_user_turn_idle")
+    async def on_user_turn_idle(aggregator):
+        await idle_handler.handle_idle(aggregator)
+
+    @user_aggregator.event_handler("on_user_turn_started")
+    async def on_user_turn_started(aggregator, strategy):
+        idle_handler.reset()
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn_stopped(aggregator, message: AssistantTurnStoppedMessage):
