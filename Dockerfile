@@ -17,3 +17,4 @@ COPY ./bot.py bot.py
 COPY ./LANGUAGE_CONSTANTS.py LANGUAGE_CONSTANTS.py
 COPY ./firebase_storage.py firebase_storage.py
 COPY ./supabase_client.py supabase_client.py
+COPY ./idle_handler.py idle_handler.py
