@@ -38,7 +38,7 @@ print("🚀 Starting Pipecat bot...")
 print("⏳ Loading models and imports (20 seconds, first run only)\n")
 
 logger.info("Loading Silero VAD model...")
-from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 
 logger.info("✅ Silero VAD model loaded")
 
@@ -65,7 +65,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
     LLMUserAggregatorParams,
 )
-from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
+from pipecat.processors.frameworks.rtvi import RTVIProcessor
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
@@ -79,7 +79,6 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
-from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from LANGUAGE_CONSTANTS import LANGUAGES
 from firebase_storage import upload_audio, generate_audio_path, generate_session_audio_chunk_path
 from idle_handler import IdleHandler
@@ -256,12 +255,12 @@ Your role:
     # stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"), live_options=deepgram_live_options)
     stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"), language=language)
 
-    input_params = CartesiaTTSService.InputParams(language=cartesia_language)
-
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id=cartesia_voice_id,
-        params=input_params,
+        settings=CartesiaTTSService.Settings(
+            voice=cartesia_voice_id,
+            language=cartesia_language if cartesia_language is not None else language,
+        ),
         text_aggregation_mode=TextAggregationMode.TOKEN,
     )
     # llm = OpenAILLMService(
@@ -345,12 +344,15 @@ Your role:
     context = LLMContext(messages, tools=tools)
     context_aggregator_pair = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(user_idle_timeout=30.0),
+        user_params=LLMUserAggregatorParams(
+            user_idle_timeout=30.0,
+            vad_analyzer=SileroVADAnalyzer(),
+        ),
     )
     user_aggregator = context_aggregator_pair.user()
     assistant_aggregator = context_aggregator_pair.assistant()
 
-    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+    rtvi = RTVIProcessor(transport=transport)
 
     class LLMFullResponseCaptureProcessor(FrameProcessor):
         """Captures full assistant responses from streamed LLM frames without affecting TTS."""
@@ -389,7 +391,7 @@ Your role:
     audiobuffer = AudioBufferProcessor(
         num_channels=1,
         enable_turn_audio=True,
-        user_continuous_stream=True,
+        user_audio_passthrough=True,
         sample_rate=SAMPLE_RATE,
         buffer_size=SAMPLE_RATE * 2 * CHUNK_DURATION_SEC,  # 16-bit mono, 60s chunks
     )
@@ -401,7 +403,6 @@ Your role:
     pipeline = Pipeline(
         [
             transport.input(),
-            rtvi,
             stt,
             user_aggregator,
             llm,
@@ -417,11 +418,8 @@ Your role:
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
-            # Without this, Pipecat will detect interruption frames but won't stop bot speech.
-            allow_interruptions=True,
         ),
-        observers=[RTVIObserver(rtvi)],
-
+        rtvi_processor=rtvi,
     )
 
     # Only fire reached-(up|down)stream events for frames we care about.
@@ -783,8 +781,11 @@ Your role:
                     logger.error(f"Error saving user audio on disconnect: {e}")
 
             async with bot_flush_lock:
-                remaining_bot = [(uid, audio_item, bot_transcripts.pop(uid, None)) for uid, audio_item in list(bot_audio.items())]
-                for uid, _ in remaining_bot:
+                remaining_bot = [
+                    (uid, audio_item, bot_transcripts.pop(uid, None))
+                    for uid, audio_item in list(bot_audio.items())
+                ]
+                for uid, _audio_item, _row in remaining_bot:
                     bot_audio.pop(uid, None)
             for uid, audio_item, row in remaining_bot:
                 try:
@@ -944,7 +945,6 @@ async def bot(runner_args: RunnerArguments):
             video_out_enabled=True,
             video_out_width=1024,
             video_out_height=576,
-            vad_analyzer=SileroVADAnalyzer(),
             transcription_enabled=True,
             audio_in_filter=krisp_filter,
         ),

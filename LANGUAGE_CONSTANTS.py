@@ -1,6 +1,10 @@
 from pipecat.transcriptions.language import Language
 
 LANGUAGES = {
+    "ar": {"pipecat_language": Language.AR, "name": "Arabic", "cartesia_voice_id": "002622d8-19d0-4567-a16a-f99c7397c062", "greeting": "حسنًا، من فضلك انتظر قليلًا بينما أستعد!"},
+    "ru": {"pipecat_language": Language.RU, "name": "Russian", "cartesia_voice_id": "1e4176b1-3db9-44d6-a601-4fe68b041942", "greeting": "Хорошо, пожалуйста, подождите, пока я готовлюсь!"},
+    "uk": {"pipecat_language": Language.UK, "name": "Ukrainian", "cartesia_voice_id": "05ffab9c-d380-4909-8375-cd12f59238c3", "greeting": "Добре, будь ласка, зачекайте, поки я готуюся!"},
+    "pa": {"pipecat_language": Language.PA, "name": "Punjabi", "cartesia_voice_id": "991c62ce-631f-48b0-8060-2a0ebecbd15b", "greeting": "ਠੀਕ ਹੈ, ਮੇਰੇ ਤਿਆਰ ਹੋਣ ਤੱਕ ਕਿਰਪਾ ਕਰਕੇ ਉਡੀਕ ਕਰੋ!"},
     "ta": {"pipecat_language": Language.TA, "name": "Tamil", "cartesia_voice_id": "7f98e662-142d-41ba-89a2-12452640ce6d", "greeting": "சரி, நான் தயாராகும் வரை தயவுசெய்து காத்திருக்குங்கள்!"},
     "en": {"pipecat_language": Language.EN, "name": "English", "cartesia_voice_id": "8d8ce8c9-44a4-46c4-b10f-9a927b99a853", "greeting": "Okay, please wait while I am getting ready!"},
     "en-IN": {"pipecat_language": Language.EN_IN, "name": "English (India)", "cartesia_voice_id": "638efaaa-4d0c-442e-b701-3fae16aad012", "greeting": "Okay, please wait while I am getting ready!"},
