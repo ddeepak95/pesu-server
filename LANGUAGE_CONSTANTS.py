@@ -5,7 +5,7 @@ LANGUAGES = {
     "ru": {"pipecat_language": Language.RU, "name": "Russian", "cartesia_voice_id": "1e4176b1-3db9-44d6-a601-4fe68b041942", "greeting": "Хорошо, пожалуйста, подождите, пока я готовлюсь!"},
     "uk": {"pipecat_language": Language.UK, "name": "Ukrainian", "cartesia_voice_id": "05ffab9c-d380-4909-8375-cd12f59238c3", "greeting": "Добре, будь ласка, зачекайте, поки я готуюся!"},
     "pa": {"pipecat_language": Language.PA, "name": "Punjabi", "cartesia_voice_id": "991c62ce-631f-48b0-8060-2a0ebecbd15b", "greeting": "ਠੀਕ ਹੈ, ਮੇਰੇ ਤਿਆਰ ਹੋਣ ਤੱਕ ਕਿਰਪਾ ਕਰਕੇ ਉਡੀਕ ਕਰੋ!"},
-    "ta": {"pipecat_language": Language.TA, "name": "Tamil", "cartesia_voice_id": "7f98e662-142d-41ba-89a2-12452640ce6d", "greeting": "சரி, நான் தயாராகும் வரை தயவுசெய்து காத்திருக்குங்கள்!"},
+    "ta": {"pipecat_language": Language.TA, "name": "Tamil", "cartesia_voice_id": "7f98e662-142d-41ba-89a2-12452640ce6d", "greeting": "சரி, நான் தயாராகும் வரை தயவுசெய்து காத்திருங்கள்!"},
     "en": {"pipecat_language": Language.EN, "name": "English", "cartesia_voice_id": "8d8ce8c9-44a4-46c4-b10f-9a927b99a853", "greeting": "Okay, please wait while I am getting ready!"},
     "en-IN": {"pipecat_language": Language.EN_IN, "name": "English (India)", "cartesia_voice_id": "638efaaa-4d0c-442e-b701-3fae16aad012", "greeting": "Okay, please wait while I am getting ready!"},
     "de": {"pipecat_language": Language.DE, "name": "German", "cartesia_voice_id": "1ade29fc-6b82-4607-9e70-361720139b12", "greeting": "Okay, bitte warte, während ich mich vorbereite!"},
@@ -16,4 +16,6 @@ LANGUAGES = {
     "fr": {"pipecat_language": Language.FR, "name": "French", "cartesia_voice_id": "ab636c8b-9960-4fb3-bb0c-b7b655fb9745", "greeting": "D’accord, veuillez patienter pendant que je me prépare !"},
     "zh": {"pipecat_language": Language.ZH, "name": "Chinese", "cartesia_voice_id": "c59c247b-6aa9-4ab6-91f9-9eabea7dc69e", "greeting": "好的，我准备一下，请稍等！"},
     "bn": {"pipecat_language": Language.BN, "name": "Bengali", "cartesia_voice_id": "2ba861ea-7cdc-43d1-8608-4045b5a41de5", "greeting": "ঠিক আছে, আমি তৈরি হওয়া পর্যন্ত দয়া করে অপেক্ষা করুন।"},
+    "cs": {"pipecat_language": Language.CS, "name": "Czech", "cartesia_voice_id": "82db1f84-5b96-4364-b04a-4c7ff80e2f8a", "greeting": "Dobře, prosím počkejte, zatímco se připravuji!"},
+    "da": {"pipecat_language": Language.DA, "name": "Danish", "cartesia_voice_id": "a466f9e2-28eb-4bb7-925c-8e8984950700", "greeting": "Okay, vent venligst, mens jeg gør mig klar!"},
 }
