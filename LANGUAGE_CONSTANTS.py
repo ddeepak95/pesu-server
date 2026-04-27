@@ -20,5 +20,5 @@ LANGUAGES = {
     "da": {"pipecat_language": Language.DA, "name": "Danish", "cartesia_voice_id": "a466f9e2-28eb-4bb7-925c-8e8984950700", "greeting": "Okay, vent venligst, mens jeg gør mig klar!"},
     "mr": {"pipecat_language": Language.MR, "name": "Marathi", "cartesia_voice_id": "f227bc18-3704-47fe-b759-8c78a450fdfa", "greeting": "ठीक आहे, मी तयार होईपर्यंत कृपया प्रतीक्षा करा!"},
     "te": {"pipecat_language": Language.TE, "name": "Telugu", "cartesia_voice_id": "cf061d8b-a752-4865-81a2-57570a6e0565", "greeting": "సరే, నేను సిద్ధమయ్యే వరకు దయచేసి వేచి ఉండండి!"},
-    "kr": {"pipecat_language": Language.KR, "name": "Korean", "cartesia_voice_id": "e1717dc3-b87b-4720-aa7f-b6db290e0609", "greeting": "네, 준비하는 동안 잠시만 기다려 주세요!"},
+    "ko": {"pipecat_language": Language.KO, "name": "Korean", "cartesia_voice_id": "e1717dc3-b87b-4720-aa7f-b6db290e0609", "greeting": "네, 준비하는 동안 잠시만 기다려 주세요!"},
 }
