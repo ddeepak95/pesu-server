@@ -128,18 +128,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info(f"Supabase environment override applied: {supabase_env}")
     
     language_key = body.get("language", "en")
-    
-    # Check if this is an assessment question or a general topic
-    question_prompt = body.get("question_prompt")
-    rubric = body.get("rubric", [])
     assignment_id = body.get("assignment_id")
     question_order = body.get("question_order")
-    
-    # New: Custom prompts from frontend (already interpolated)
-    # If provided, these take precedence over the hardcoded prompts
-    custom_system_prompt = body.get("system_prompt")
-    custom_greeting = body.get("greeting")
-    
+
+    # Prompts from frontend (already interpolated). Both are required;
+    # see src/lib/ai/chat-stream.ts for the matching pattern on the chat side.
+    system_prompt = body.get("system_prompt")
+    greeting = body.get("greeting")
+    if not system_prompt or not greeting:
+        raise ValueError(
+            "Missing required body fields: 'system_prompt' and 'greeting' must be provided by the frontend"
+        )
+
     # Session metadata for audio recording
     submission_id = body.get("submission_id")
     attempt_number = body.get("attempt_number", 1)
@@ -173,75 +173,19 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     bot_state = {"speaking": False, "current_bot_interrupted": False}
     
     language = LANGUAGES[language_key]["pipecat_language"]
-    language_name = LANGUAGES[language_key]["name"]
     cartesia_voice_id = LANGUAGES[language_key]["cartesia_voice_id"]
-    static_greeting = LANGUAGES[language_key].get("greeting")
 
-    # Build prompt based on whether it's an assessment or general conversation
-    # TTS instruction to append for voice mode
-    TTS_INSTRUCTION = "\n\nThe text you generate will be used for text to speech conversion, so don't include any special characters or formatting. Use colloquial language and be friendly. Keep your responses very short with no more than 10 words. More conversational turns are better than longer responses from your side. For bilingual conversations, use the English words directly in the dialogue when English terms are used in the conversation instead of putting them in brackets and write the English words using English alphabet."
-    
-    if custom_system_prompt:
-        # New path: Use frontend-provided prompt (already interpolated)
-        logger.info(f"Using custom system prompt from frontend - Assignment: {assignment_id}, Question: {question_order}")
-        prompt = custom_system_prompt + TTS_INSTRUCTION
-    elif question_prompt:
-        # Assessment mode: focused on specific question (backward compatibility)
-        logger.info(f"Assessment mode (legacy) - Assignment: {assignment_id}, Question: {question_order}")
-        rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
-        
-        # Build prompt with first-question flow without duplicating the spoken opener.
-        if question_order == 0:
-            prompt = f"""You are a teacher conducting a voice-based formative assessment in {language_name}. Your name is Konvo.
-
-The student needs to answer this question:
-{question_prompt}
-
-Evaluation criteria:
-{rubric_text}
-
-CONVERSATION FLOW (for first question only):
-Your first spoken turn must follow [Instructions for your first response] at the end of this message. Ask the readiness question only once.
-
-After the student acknowledges they are ready (for example: yes, ready, let's start, we can start), explain the question clearly, ask them to answer it, then proceed with the normal assessment flow below. Do NOT explain the assessment question before they acknowledge readiness.
-
-NORMAL ASSESSMENT FLOW (after question is explained):
-1. Have a natural conversation to understand their thinking
-2. Ask follow-up questions to gauge depth of understanding
-3. Be encouraging and supportive
-4. Help them elaborate if they're stuck, but don't give away the answer
-5. Keep the questions short and concise
-6. Keep your responses very short and concise and conversational.
-7. Always use English for concept-specific & technical words while keeping the discussions in {language_name}
-
-{TTS_INSTRUCTION}
-"""
-        else:
-            # For subsequent questions, use the original prompt structure
-            prompt = f"""You are a teacher conducting a voice-based formative assessment in {language_name}. 
-
-The student needs to answer this question:
-{question_prompt}
-
-Evaluation criteria:
-{rubric_text}
-
-Your role:
-1. Ask the student to answer the question
-2. Have a natural conversation to understand their thinking
-3. Ask follow-up questions to gauge depth of understanding
-4. Be encouraging and supportive
-5. Help them elaborate if they're stuck, but don't give away the answer
-6. Keep the questions short and concise.
-7. Always use English for concept-specific & technical words while keeping the discussions in {language_name}
-
-{TTS_INSTRUCTION}
-"""
-    else:
-        # General conversation mode (legacy)
-        topic_arg = body.get("topic", "newton's laws of motion and gravity")
-        prompt = f"""You are a friendly science teacher who speaks in {language_name}. You have to quiz the student on {topic_arg}. You have to ask the student to solve the problems and give the correct answer. Ask conceptual questions to check the student's understanding of the concepts. {TTS_INSTRUCTION}
-"""
+    # Bake the first-response greeting into the system prompt under the
+    # `[Instructions for your first response]:` marker. Mirrors
+    # src/lib/ai/chat-stream.ts so the bot has its first-turn guidance inline
+    # in the system prompt rather than as a separate developer-role message.
+    # The combined prompt is later inserted as messages[0] (role="system")
+    # in the LLMContext; Pipecat's Gemini adapter hoists it into the
+    # provider's `system_instruction` for us.
+    logger.info(
+        f"Using frontend-provided system prompt and greeting - Assignment: {assignment_id}, Question: {question_order}"
+    )
+    prompt = system_prompt + f"\n\n[Instructions for your first response]: {greeting.strip()}"
 
     cartesia_language = language_to_cartesia_language(language)
     # stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"), live_options=deepgram_live_options)
@@ -270,7 +214,6 @@ Your role:
         settings=GoogleLLMService.Settings(
             model="gemini-2.5-flash",
             thinking=GoogleThinkingConfig(thinking_budget=0),
-            system_instruction=prompt,
         ),
     )
 
@@ -327,33 +270,17 @@ Your role:
     # Register the function handler
     llm.register_function("end_conversation", handle_end_conversation)
 
-    if custom_greeting:
-        greeting_for_first_turn = custom_greeting.strip()
-        logger.info("Using custom greeting from frontend (developer first-response instruction)")
-    elif question_order == 0:
-        greeting_for_first_turn = (
-            f"Speaking in {language_name}, start by introducing yourself as Konvo and tell that you are their teacher's assistant. "
-            f"Say that we are going to do an activity today. Explain that the student will take part by responding to your questions and they can also ask for doubts if any. "
-            f"Ask them to be in a quieter place to avoid disturbances and ask if the student is ready to start. "
-            f"Ask them to say 'yes' or 'ready' when they are ready to start. Wait for their acknowledgment before explaining the question."
-        ).strip()
-        logger.info("Using legacy first-question greeting (developer first-response instruction)")
-    else:
-        ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
-        ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
-        greeting_for_first_turn = (
-            f"Speaking in {language_name}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
-        ).strip()
-        logger.info("Using legacy subsequent-question greeting (developer first-response instruction)")
-
-    messages = []
-    if greeting_for_first_turn:
-        messages.append(
-            {
-                "role": "developer",
-                "content": f"[Instructions for your first response]: {greeting_for_first_turn}",
-            }
-        )
+    # Put the system prompt as the first message in the context. Pipecat's
+    # Gemini adapter (`_extract_initial_system`) hoists `messages[0]` with
+    # role="system" into Gemini's `system_instruction` automatically, so we
+    # keep all conversation state in one place (the LLMContext) instead of
+    # splitting it across Settings.system_instruction.
+    # The "Begin." user message satisfies Gemini's requirement of at least
+    # one non-system message and matches src/lib/ai/chat-stream.ts.
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": "Begin."},
+    ]
 
     context = LLMContext(messages, tools=tools)
     context_aggregator_pair = LLMContextAggregatorPair(
@@ -626,17 +553,11 @@ Your role:
             bot_state["speaking"] = False
             bot_state["current_bot_interrupted"] = False
             logger.info(f"Audio recording started for submission {submission_id} at {session_recording_started_at}")
-        
-        # Play a quick static greeting for the selected language while the LLM prepares its first response.
-        if static_greeting:
-            try:
-                logger.info(f"Playing static greeting for language {language_key}")
-                await task.queue_frames([TTSSpeakFrame(static_greeting)])
-            except Exception as e:
-                logger.error(f"Error playing static greeting for language {language_key}: {e}")
-        
-        # Start the conversation. Core behavior is in system_instruction and
-        # first-response guidance is in the context as a developer message.
+
+        # Start the conversation. The LLMContext already holds the system
+        # prompt + first-response guidance as messages[0] and a synthetic
+        # "Begin." user message (see chat-stream.ts pattern); the Gemini
+        # adapter hoists messages[0] into system_instruction at invocation.
         # Note: bot_state["speaking"] will be set by BotStartedSpeakingFrame handler
         await task.queue_frames([LLMRunFrame()])
 
