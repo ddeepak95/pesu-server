@@ -190,7 +190,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info(f"Assessment mode (legacy) - Assignment: {assignment_id}, Question: {question_order}")
         rubric_text = "\n".join([f"- {item['item']} ({item['points']} points)" for item in rubric]) if rubric else "No specific rubric provided."
         
-        # Build prompt with two-phase instructions for first question
+        # Build prompt with first-question flow without duplicating the spoken opener.
         if question_order == 0:
             prompt = f"""You are a teacher conducting a voice-based formative assessment in {language_name}. Your name is Konvo.
 
@@ -201,17 +201,9 @@ Evaluation criteria:
 {rubric_text}
 
 CONVERSATION FLOW (for first question only):
-Phase 1 - Introduction:
-1. Introduce yourself as "Konvo" in {language_name}
-2. Say: "We are going to do an activity today"
-3. Ask: "If you are ready to start, say that we can start"
-4. Wait for the student to acknowledge they are ready (they may say "yes", "ready", "let's start", "we can start", or similar phrases)
-5. Do NOT explain the question until the student acknowledges readiness
+Your first spoken turn must follow [Instructions for your first response] at the end of this message. Ask the readiness question only once.
 
-Phase 2 - Question Explanation (after student acknowledges readiness):
-1. Once the student acknowledges they are ready, explain the question clearly
-2. Ask the student to answer the question
-3. Proceed with the normal assessment flow below
+After the student acknowledges they are ready (for example: yes, ready, let's start, we can start), explain the question clearly, ask them to answer it, then proceed with the normal assessment flow below. Do NOT explain the assessment question before they acknowledge readiness.
 
 NORMAL ASSESSMENT FLOW (after question is explained):
 1. Have a natural conversation to understand their thinking
@@ -277,7 +269,8 @@ Your role:
         api_key=os.getenv("GEMINI_API_KEY"),
         settings=GoogleLLMService.Settings(
             model="gemini-2.5-flash",
-            thinking = GoogleThinkingConfig(thinking_budget = 0)
+            thinking=GoogleThinkingConfig(thinking_budget=0),
+            system_instruction=prompt,
         ),
     )
 
@@ -334,12 +327,33 @@ Your role:
     # Register the function handler
     llm.register_function("end_conversation", handle_end_conversation)
 
-    messages = [
-        {
-            "role": "system",
-            "content": prompt,
-        },
-    ]
+    if custom_greeting:
+        greeting_for_first_turn = custom_greeting.strip()
+        logger.info("Using custom greeting from frontend (developer first-response instruction)")
+    elif question_order == 0:
+        greeting_for_first_turn = (
+            f"Speaking in {language_name}, start by introducing yourself as Konvo and tell that you are their teacher's assistant. "
+            f"Say that we are going to do an activity today. Explain that the student will take part by responding to your questions and they can also ask for doubts if any. "
+            f"Ask them to be in a quieter place to avoid disturbances and ask if the student is ready to start. "
+            f"Ask them to say 'yes' or 'ready' when they are ready to start. Wait for their acknowledgment before explaining the question."
+        ).strip()
+        logger.info("Using legacy first-question greeting (developer first-response instruction)")
+    else:
+        ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
+        ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
+        greeting_for_first_turn = (
+            f"Speaking in {language_name}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
+        ).strip()
+        logger.info("Using legacy subsequent-question greeting (developer first-response instruction)")
+
+    messages = []
+    if greeting_for_first_turn:
+        messages.append(
+            {
+                "role": "developer",
+                "content": f"[Instructions for your first response]: {greeting_for_first_turn}",
+            }
+        )
 
     context = LLMContext(messages, tools=tools)
     context_aggregator_pair = LLMContextAggregatorPair(
@@ -621,23 +635,8 @@ Your role:
             except Exception as e:
                 logger.error(f"Error playing static greeting for language {language_key}: {e}")
         
-        # Determine greeting based on question order
-        if custom_greeting:
-            # New path: Use frontend-provided greeting (already interpolated)
-            logger.info(f"Using custom greeting from frontend")
-            greeting = custom_greeting
-        elif question_order == 0:
-            # Legacy path: First question greeting
-            greeting = f"Speaking in {language_name}, start by introducing yourself as Konvo and tell that you are their teacher's assistant. Say that we are going to do an activity today. Explain that the student will take part by responding to your questions and they can also ask for doubts if any. Ask them to be in a quieter place to avoid disturbances and ask if the student is ready to start. Ask them to say 'yes' or 'ready' when they are ready to start. Wait for their acknowledgment before explaining the question."
-        else:
-            # Legacy path: Subsequent question greeting
-            # Convert order to ordinal (1 -> second, 2 -> third, etc.)
-            ordinals = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
-            ordinal = ordinals[question_order] if question_order < len(ordinals) else f"{question_order + 1}th"
-            greeting = f"Speaking in {language_name}, acknowledge we're moving to the {ordinal} question, then ask the student to answer it."
-        
-        # Start the conversation (LLM-driven greeting/intro will follow the static greeting)
-        messages.append({"role": "system", "content": greeting})
+        # Start the conversation. Core behavior is in system_instruction and
+        # first-response guidance is in the context as a developer message.
         # Note: bot_state["speaking"] will be set by BotStartedSpeakingFrame handler
         await task.queue_frames([LLMRunFrame()])
 
